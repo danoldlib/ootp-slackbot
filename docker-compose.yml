@@ -1,0 +1,9 @@
+version: '3.8'
+
+services:
+  ootp-slackbot:
+    build: .
+    container_name: ootp-slackbot
+    restart: always
+    env_file:
+      - .env
