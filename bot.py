@@ -13,43 +13,39 @@ SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 LEAGUE_URL = os.getenv("LEAGUE_URL", "https://statsplus.net/xfbl")
 DAYS_BACK = int(os.getenv("DAYS_BACK", "7"))
 
-def post_sim_header(summary_text=""):
-    """
-    Posts the main header to the channel and returns the thread_ts for threaded replies.
-    """
-    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
-        print("Missing Slack configuration. Cannot post to Slack.")
-        return None
-        
-    client = WebClient(token=SLACK_BOT_TOKEN)
-    text = f"⚾ *XFBL Sim Complete!* Expand this thread for your recap...\n_{summary_text}_"
-    try:
-        result = client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            text=text
-        )
-        return result['ts']
-    except SlackApiError as e:
-        print(f"Error posting header to Slack: {e.response['error']}")
-        return None
-
-def post_to_slack(performance, title, thread_ts=None):
-    """
-    Constructs a Block Kit payload and posts it to Slack.
-    """
-    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
-         return
-         
-    client = WebClient(token=SLACK_BOT_TOKEN)
-    stats_table = performance['stat_line']
-    
-    blocks = [
+def build_sim_header_blocks(summary_text=""):
+    return [
         {
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": f"🔥 {title}: {performance['name']} 🔥",
+                "text": "📰 XFBL Daily Digest: Sim Complete!",
                 "emoji": True
+            }
+        },
+        {
+            "type": "context",
+            "elements": [
+                {
+                    "type": "mrkdwn",
+                    "text": f"_{summary_text}_"
+                }
+            ]
+        },
+        {
+            "type": "divider"
+        }
+    ]
+
+def build_performance_blocks(performance, title):
+    stats_table = performance['stat_line']
+    
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"🔥 *{title}: {performance['name']}*\n*{performance['name']}* ({performance['team']}) put on an absolute clinic.\n`{stats_table}`"
             }
         },
         {
@@ -63,16 +59,6 @@ def post_to_slack(performance, title, thread_ts=None):
             ]
         },
         {
-            "type": "divider"
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"*{performance['name']}* ({performance['team']}) put on an absolute clinic.\n\n*Stat Line:*\n`{stats_table}`"
-            }
-        },
-        {
             "type": "actions",
             "elements": [
                 {
@@ -83,7 +69,7 @@ def post_to_slack(performance, title, thread_ts=None):
                         "emoji": True
                     },
                     "url": performance['box_url'],
-                    "action_id": "btn_box_score"
+                    "action_id": f"btn_box_{performance['name'].replace(' ', '_')}"
                 }
             ]
         }
@@ -98,36 +84,23 @@ def post_to_slack(performance, title, thread_ts=None):
                 "emoji": True
             },
             "url": f"{LEAGUE_URL}/player/{performance['player_id']}",
-            "action_id": "btn_profile"
+            "action_id": f"btn_prof_{performance['player_id']}"
         })
 
-    try:
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            thread_ts=thread_ts,
-            blocks=blocks,
-            text=f"{title}: {performance['name']}"
-        )
-        print("Successfully posted to Slack!")
-    except SlackApiError as e:
-        print(f"Error posting to Slack: {e.response['error']}")
+    blocks.append({"type": "divider"})
+    return blocks
 
-def post_milestones_to_slack(milestones, thread_ts=None):
-    if not milestones or not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
-        return
+def build_milestones_blocks(milestones):
+    if not milestones:
+        return []
         
-    client = WebClient(token=SLACK_BOT_TOKEN)
     blocks = [
         {
-            "type": "header",
+            "type": "section",
             "text": {
-                "type": "plain_text",
-                "text": "🏆 Sim Recap Highlights 🏆",
-                "emoji": True
+                "type": "mrkdwn",
+                "text": "🏆 *Sim Highlights & Milestones*"
             }
-        },
-        {
-            "type": "divider"
         }
     ]
     
@@ -140,33 +113,20 @@ def post_milestones_to_slack(milestones, thread_ts=None):
             }
         })
         
-    try:
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            thread_ts=thread_ts,
-            blocks=blocks,
-            text="Sim Recap Highlights"
-        )
-        print("Successfully posted milestones to Slack!")
-    except SlackApiError as e:
-        print(f"Error posting milestones to Slack: {e.response['error']}")
+    blocks.append({"type": "divider"})
+    return blocks
 
-def post_analytics_to_slack(hottest, coldest, luckiest, unluckiest, thread_ts=None):
-    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID or not hottest or not luckiest:
-        return
+def build_analytics_blocks(hottest, coldest, luckiest, unluckiest):
+    if not hottest or not luckiest:
+        return []
         
-    client = WebClient(token=SLACK_BOT_TOKEN)
     blocks = [
         {
-            "type": "header",
+            "type": "section",
             "text": {
-                "type": "plain_text",
-                "text": "📊 Sim Analytics & Trends 📊",
-                "emoji": True
+                "type": "mrkdwn",
+                "text": "📊 *Sim Analytics & Trends*"
             }
-        },
-        {
-            "type": "divider"
         },
         {
             "type": "section",
@@ -181,36 +141,25 @@ def post_analytics_to_slack(hottest, coldest, luckiest, unluckiest, thread_ts=No
                 "type": "mrkdwn",
                 "text": f"🍀 *Luckiest Team*: The *{luckiest['team']}* have *+{luckiest['luck']}* more wins than their BaseRuns predict ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Unluckiest Team*: The *{unluckiest['team']}* have *{unluckiest['luck']}* fewer wins than their BaseRuns predict ({unluckiest['actual']} actual vs {unluckiest['expected']} expected)."
             }
-        }
-    ]
-    
-    try:
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            thread_ts=thread_ts,
-            blocks=blocks,
-            text="Sim Analytics & Trends"
-        )
-        print("Successfully posted analytics to Slack!")
-    except SlackApiError as e:
-        print(f"Error posting analytics to Slack: {e.response['error']}")
-
-def post_division_races_to_slack(races, thread_ts=None):
-    if not races or not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
-        return
-        
-    client = WebClient(token=SLACK_BOT_TOKEN)
-    blocks = [
-        {
-            "type": "header",
-            "text": {
-                "type": "plain_text",
-                "text": "🏁 Pennant Race Watch 🏁",
-                "emoji": True
-            }
         },
         {
             "type": "divider"
+        }
+    ]
+    
+    return blocks
+
+def build_division_races_blocks(races):
+    if not races:
+        return []
+        
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🏁 *Pennant Race Watch*"
+            }
         }
     ]
     
@@ -223,17 +172,24 @@ def post_division_races_to_slack(races, thread_ts=None):
             }
         })
         
+    return blocks
+
+def post_daily_digest(blocks):
+    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
+        print("Missing Slack configuration. Cannot post to Slack.")
+        return
+        
+    client = WebClient(token=SLACK_BOT_TOKEN)
+    
     try:
         client.chat_postMessage(
             channel=SLACK_CHANNEL_ID,
-            thread_ts=thread_ts,
             blocks=blocks,
-            text="Pennant Race Watch"
+            text="📰 XFBL Daily Digest: Sim Complete!"
         )
-        print("Successfully posted division races to Slack!")
+        print("Successfully posted daily digest to Slack!")
     except SlackApiError as e:
-        print(f"Error posting division races to Slack: {e.response['error']}")
-
+        print(f"Error posting daily digest to Slack: {e.response['error']}")
 
 def main():
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
@@ -262,41 +218,27 @@ def main():
         
     summary_text = "Includes: " + ", ".join(summary_parts) if summary_parts else "No notable updates this sim."
 
-    print("Posting Sim Header...")
-    thread_ts = post_sim_header(summary_text)
+    print("Building Daily Digest blocks...")
+    all_blocks = []
+    all_blocks.extend(build_sim_header_blocks(summary_text))
     
-    if not thread_ts:
-        print("Failed to start thread. Posting individually.")
-
     if best_pitcher:
-        print(f"Best Pitcher Found: {best_pitcher['name']}")
-        post_to_slack(best_pitcher, "Pitcher of the Sim", thread_ts)
-    else:
-        print("No pitching performance found in timeframe.")
-        
+        all_blocks.extend(build_performance_blocks(best_pitcher, "Pitcher of the Sim"))
     if best_batter:
-        print(f"Best Batter Found: {best_batter['name']}")
-        post_to_slack(best_batter, "Batter of the Sim", thread_ts)
-    else:
-        print("No batting performance found in timeframe.")
-
+        all_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
     if milestones:
-        print(f"Found {len(milestones)} impressive milestones.")
-        post_milestones_to_slack(milestones, thread_ts)
-    else:
-        print("No impressive milestones found.")
-
+        all_blocks.extend(build_milestones_blocks(milestones))
     if hottest and luckiest:
-        print("Team analytics found.")
-        post_analytics_to_slack(hottest, coldest, luckiest, unluckiest, thread_ts)
-    else:
-        print("Could not fetch complete team analytics.")
-        
+        all_blocks.extend(build_analytics_blocks(hottest, coldest, luckiest, unluckiest))
     if races:
-        print(f"Found {len(races)} close division races.")
-        post_division_races_to_slack(races, thread_ts)
-    else:
-        print("No close division races found.")
+        all_blocks.extend(build_division_races_blocks(races))
+        
+    # Remove the very last divider if it exists
+    if all_blocks and all_blocks[-1].get("type") == "divider":
+        all_blocks.pop()
+
+    print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
+    post_daily_digest(all_blocks)
 
 if __name__ == "__main__":
     main()
