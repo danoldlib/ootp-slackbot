@@ -3,15 +3,21 @@ import re
 from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
+from slack_bolt import App
+from slack_bolt.adapter.socket_mode import SocketModeHandler
+import time
 from scraper import get_best_performances, get_milestones, get_team_momentum, get_team_luck, get_close_division_races
 
 # Load environment variables
 load_dotenv()
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
+SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 LEAGUE_URL = os.getenv("LEAGUE_URL", "https://statsplus.net/xfbl")
 DAYS_BACK = int(os.getenv("DAYS_BACK", "7"))
+
+app = App(token=SLACK_BOT_TOKEN)
 
 def build_sim_header_blocks(summary_text=""):
     return [
@@ -191,7 +197,7 @@ def post_daily_digest(blocks):
     except SlackApiError as e:
         print(f"Error posting daily digest to Slack: {e.response['error']}")
 
-def main():
+def trigger_daily_digest():
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
     
@@ -239,6 +245,22 @@ def main():
 
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
+
+@app.message(re.compile(r"StatsPlus website has been updated"))
+def handle_sim_complete(message, say):
+    print("Detected StatsPlus update message!")
+    print("Waiting 3 minutes before scraping...")
+    time.sleep(180)
+    trigger_daily_digest()
+
+def main():
+    if not SLACK_APP_TOKEN or not SLACK_BOT_TOKEN:
+        print("Missing SLACK_APP_TOKEN or SLACK_BOT_TOKEN. Cannot start Socket Mode.")
+        return
+        
+    print("Starting Slack bot in Socket Mode...")
+    handler = SocketModeHandler(app, SLACK_APP_TOKEN)
+    handler.start()
 
 if __name__ == "__main__":
     main()
