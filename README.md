@@ -65,3 +65,14 @@ This will run the bot in the background and automatically restart it if it crash
 
 ## Usage
 Once running, the bot sits idle in the background. It automatically triggers when it detects the message **"StatsPlus website has been updated"** in your Slack channel. It will wait 3 minutes for data to propagate and then post the Daily Digest.
+
+### 💡 Tips & Troubleshooting
+*   **Channel Membership**: The bot **must** be a member of the channel where the StatsPlus announcements are posted. In Slack, go to that channel and type `/invite @YourBotName`.
+*   **Manual Run**: If a sim finished but the bot didn't trigger (or if you just want to run it on demand), you can force a manual update:
+    ```bash
+    python bot.py --manual
+    ```
+    If using Docker, you can run the manual command inside the container:
+    ```bash
+    docker-compose run ootp-slackbot python bot.py --manual
+    ```

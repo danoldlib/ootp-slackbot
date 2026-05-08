@@ -6,7 +6,8 @@ from slack_sdk.errors import SlackApiError
 from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import time
-from scraper import get_best_performances, get_milestones, get_team_momentum, get_team_luck, get_close_division_races
+import sys
+from scraper import get_best_performances, get_milestones, get_team_momentum, get_team_luck, get_close_division_races, get_notable_games, get_api_oddities
 
 # Load environment variables
 load_dotenv()
@@ -45,13 +46,41 @@ def build_sim_header_blocks(summary_text=""):
 
 def build_performance_blocks(performance, title):
     stats_table = performance['stat_line']
+    stats = performance.get('stats', [])
+    opponent = performance.get('opponent', '???')
     
+    # Generate a contextual blurb from the actual stats
+    if performance.get('is_pitcher') and len(stats) >= 7:
+        try:
+            ip = stats[0]
+            hits = stats[1]
+            ks = stats[2]
+            bbs = stats[3]
+            hrs = stats[4]
+            gs = stats[6]
+            blurb = f"Threw *{ip} innings* against {opponent}, striking out *{ks}* with only *{bbs} walks* and allowing *{hits} hits*. Game Score: *{gs}*."
+        except (IndexError, ValueError):
+            blurb = f"Dominated the opposition vs {opponent}."
+    elif not performance.get('is_pitcher') and len(stats) >= 7:
+        try:
+            h = stats[2]
+            ab = stats[0]
+            hrs = int(stats[3])
+            rbi = stats[4]
+            bbs = stats[5]
+            hr_str = f" *{hrs} home run{'s' if hrs != 1 else ''}* and" if hrs > 0 else ""
+            blurb = f"Went *{h}-for-{ab}* vs {opponent} with{hr_str} *{rbi} RBI*."
+        except (IndexError, ValueError):
+            blurb = f"Had a monster game vs {opponent}."
+    else:
+        blurb = f"Put on a show vs {opponent}."
+
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"🔥 *{title}: {performance['name']}*\n*{performance['name']}* ({performance['team']}) put on an absolute clinic.\n`{stats_table}`"
+                "text": f"🔥 *{title}: {performance['name']}*\n*{performance['name']}* ({performance['team']}) {blurb}\n`{stats_table}`"
             }
         },
         {
@@ -155,6 +184,67 @@ def build_analytics_blocks(hottest, coldest, luckiest, unluckiest):
     
     return blocks
 
+def build_notable_games_blocks(notable_games):
+    if not notable_games:
+        return []
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🗞️ *Weird Sim: Notable Moments*"
+            }
+        }
+    ]
+
+    for game in notable_games:
+        block = {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": game['text']
+            }
+        }
+        if game.get('box_url'):
+            block["accessory"] = {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Box Score", "emoji": True},
+                "url": game['box_url'],
+                "action_id": f"btn_notable_{notable_games.index(game)}"
+            }
+        blocks.append(block)
+
+    blocks.append({"type": "divider"})
+    return blocks
+
+def build_api_oddities_blocks(oddities):
+    if not oddities:
+        return []
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "📊 *By the Numbers: League Oddities*"
+            }
+        }
+    ]
+
+    for item in oddities:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": item['text']
+            }
+        })
+
+    blocks.append({"type": "divider"})
+    return blocks
+
+
 def build_division_races_blocks(races):
     if not races:
         return []
@@ -208,6 +298,11 @@ def trigger_daily_digest():
     hottest, coldest = get_team_momentum(LEAGUE_URL)
     luckiest, unluckiest = get_team_luck(LEAGUE_URL)
     
+    print(f"Fetching API oddities...")
+    api_oddities = get_api_oddities(LEAGUE_URL)
+
+    print(f"Fetching notable/weird games...")
+    notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
     print(f"Fetching close division races...")
     races = get_close_division_races(LEAGUE_URL)
 
@@ -221,6 +316,10 @@ def trigger_daily_digest():
         summary_parts.append("Team Analytics")
     if races:
         summary_parts.append(f"{len(races)} Pennant Races")
+    if notable_games:
+        summary_parts.append(f"{len(notable_games)} Weird Moments")
+    if api_oddities:
+        summary_parts.append(f"{len(api_oddities)} League Stats")
         
     summary_text = "Includes: " + ", ".join(summary_parts) if summary_parts else "No notable updates this sim."
 
@@ -236,6 +335,10 @@ def trigger_daily_digest():
         all_blocks.extend(build_milestones_blocks(milestones))
     if hottest and luckiest:
         all_blocks.extend(build_analytics_blocks(hottest, coldest, luckiest, unluckiest))
+    if api_oddities:
+        all_blocks.extend(build_api_oddities_blocks(api_oddities))
+    if notable_games:
+        all_blocks.extend(build_notable_games_blocks(notable_games))
     if races:
         all_blocks.extend(build_division_races_blocks(races))
         
@@ -246,12 +349,27 @@ def trigger_daily_digest():
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
 
-@app.message(re.compile(r"StatsPlus website has been updated"))
+@app.message(re.compile(r"StatsPlus.*updated", re.IGNORECASE))
 def handle_sim_complete(message, say):
-    print("Detected StatsPlus update message!")
-    print("Waiting 3 minutes before scraping...")
+    print(f"✅ MATCH FOUND: {message.get('text')}")
+    print("🚀 Detected StatsPlus update message! Waiting 3 minutes before scraping...")
     time.sleep(180)
     trigger_daily_digest()
+
+@app.event("message")
+def handle_message_events(body, logger):
+    # This captures all messages for debugging purposes
+    event = body.get("event", {})
+    text = event.get("text")
+    subtype = event.get("subtype")
+    
+    if subtype == "channel_join" or subtype == "channel_leave":
+        return # Quietly ignore join/leave messages
+        
+    if text:
+        print(f"📩 Message received: {text}")
+    elif event.get("blocks"):
+        print(f"📦 Block message received (Subtype: {subtype})")
 
 def main():
     if not SLACK_APP_TOKEN or not SLACK_BOT_TOKEN:
@@ -263,4 +381,8 @@ def main():
     handler.start()
 
 if __name__ == "__main__":
-    main()
+    if "--manual" in sys.argv:
+        print("🚀 Manual override detected. Running Daily Digest immediately...")
+        trigger_daily_digest()
+    else:
+        main()
