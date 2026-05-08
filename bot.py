@@ -381,8 +381,17 @@ def main():
     handler.start()
 
 if __name__ == "__main__":
+    import sys
+    # Force unbuffered output so print statements appear immediately in docker exec
+    sys.stdout.reconfigure(line_buffering=True)
+
     if "--manual" in sys.argv:
-        print("🚀 Manual override detected. Running Daily Digest immediately...")
-        trigger_daily_digest()
+        print("🚀 Manual override detected. Running Daily Digest immediately...", flush=True)
+        try:
+            trigger_daily_digest()
+        except Exception as e:
+            import traceback
+            print(f"❌ ERROR during manual digest: {e}", flush=True)
+            traceback.print_exc()
     else:
         main()
