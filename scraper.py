@@ -427,14 +427,29 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             return []
 
     # Build lookup dicts
+    # Players API cols: ID, First Name, Last Name
     player_rows = fetch_csv(players_api)
-    player_names = {r['player_id']: r['player_name'] for r in player_rows if 'player_id' in r and 'player_name' in r}
+    player_names = {}
+    for r in player_rows:
+        pid = r.get('ID', '').strip()
+        first = r.get('First Name', '').strip()
+        last = r.get('Last Name', '').strip()
+        if pid:
+            player_names[pid] = f"{first} {last}".strip()
 
+    # Teams API cols: ID, Name, Nickname
     team_rows = fetch_csv(teams_api)
-    team_names = {r['team_id']: r['team_abbr'] for r in team_rows if 'team_id' in r and 'team_abbr' in r}
+    team_display = {}
+    for r in team_rows:
+        tid = r.get('ID', '').strip()
+        name = r.get('Name', '').strip()
+        nick = r.get('Nickname', '').strip()
+        if tid:
+            # Use short city name as the display label (e.g. "Cincinnati")
+            team_display[tid] = name
 
     def pname(pid, tid):
-        return player_names.get(str(pid), f"Player#{pid}"), team_names.get(str(tid), f"T{tid}")
+        return player_names.get(str(pid), f"Player#{pid}"), team_display.get(str(tid), f"T{tid}")
 
     # --- Batting oddities ---
     bat_rows = fetch_csv(bat_api)
