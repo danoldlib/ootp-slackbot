@@ -52,21 +52,23 @@ def build_performance_blocks(performance, title):
     # Generate a contextual blurb from the actual stats
     if performance.get('is_pitcher') and len(stats) >= 7:
         try:
+            # stats mapping: 0:IP, 1:R, 2:H, 3:HR, 4:BB, 5:K, 6:GS
             ip = stats[0]
-            hits = stats[1]
-            ks = stats[2]
-            bbs = stats[3]
-            hrs = stats[4]
+            hits = stats[2]
+            ks = stats[5]
+            bbs = stats[4]
+            hrs = stats[3]
             gs = stats[6]
             blurb = f"Threw *{ip} innings* against {opponent}, striking out *{ks}* with only *{bbs} walks* and allowing *{hits} hits*. Game Score: *{gs}*."
         except (IndexError, ValueError):
             blurb = f"Dominated the opposition vs {opponent}."
     elif not performance.get('is_pitcher') and len(stats) >= 7:
         try:
-            h = stats[2]
+            # stats mapping: 0:AB, 1:H, 2:RBI, 3:HR, 4:R, 5:BB, 6:GS
+            h = stats[1]
             ab = stats[0]
             hrs = int(stats[3])
-            rbi = stats[4]
+            rbi = stats[2]
             bbs = stats[5]
             hr_str = f" *{hrs} home run{'s' if hrs != 1 else ''}* and" if hrs > 0 else ""
             blurb = f"Went *{h}-for-{ab}* vs {opponent} with{hr_str} *{rbi} RBI*."

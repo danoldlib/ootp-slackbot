@@ -86,7 +86,8 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
             if is_pitcher:
                 stats = [c.text.strip() for c in cols[6:]]
                 if len(stats) >= 7:
-                    stat_line = f"IP: {stats[0]} | H: {stats[1]} | K: {stats[2]} | BB: {stats[3]} | HR: {stats[4]} | GS: {stats[6]}"
+                    # Pitching columns: 0:IP, 1:R, 2:H, 3:HR, 4:BB, 5:K, 6:GS
+                    stat_line = f"IP: {stats[0]} | H: {stats[2]} | K: {stats[5]} | BB: {stats[4]} | HR: {stats[3]} | GS: {stats[6]}"
                     metric = f"{stats[-1]} Game Score"
                 else:
                     stat_line = " | ".join(stats)
@@ -94,7 +95,8 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
             else:
                 stats = [c.text.strip() for c in cols[6:]]
                 if len(stats) >= 7:
-                    stat_line = f"AB: {stats[0]} | R: {stats[1]} | H: {stats[2]} | HR: {stats[3]} | RBI: {stats[4]} | BB: {stats[5]} | K: {stats[6]}"
+                    # Batting columns: 0:AB, 1:H, 2:RBI, 3:HR, 4:R, 5:BB, 6:GS
+                    stat_line = f"AB: {stats[0]} | R: {stats[4]} | H: {stats[1]} | HR: {stats[3]} | RBI: {stats[2]} | BB: {stats[5]} | GS: {stats[6]}"
                     metric = f"Score/WPA: {stats[-1]}"
                 else:
                     stat_line = " | ".join(stats)
