@@ -1,5 +1,6 @@
 import os
 import re
+import threading
 from dotenv import load_dotenv
 from slack_sdk import WebClient
 from slack_sdk.errors import SlackApiError
@@ -355,8 +356,13 @@ def trigger_daily_digest():
 def handle_sim_complete(message, say):
     print(f"✅ MATCH FOUND: {message.get('text')}")
     print("🚀 Detected StatsPlus update message! Waiting 3 minutes before scraping...")
-    time.sleep(180)
-    trigger_daily_digest()
+    
+    def run_delayed_digest():
+        time.sleep(180)
+        trigger_daily_digest()
+        
+    thread = threading.Thread(target=run_delayed_digest)
+    thread.start()
 
 @app.event("message")
 def handle_message_events(body, logger):
