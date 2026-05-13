@@ -544,6 +544,83 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "📉"
             })
 
+        # 8. Human Out (lowest batting average, min 100 PA)
+        avg_losers = [r for r in qualified_bat if safe_float(r, 'avg') > 0]
+        if avg_losers:
+            avg_loser = min(avg_losers, key=lambda r: safe_float(r, 'avg'))
+            name, team = pname(avg_loser['player_id'], avg_loser['team_id'])
+            oddities.append({
+                "text": f"🧱 *Human Out:* {name} ({team}) is hitting a paltry *.{int(safe_float(avg_loser, 'avg') * 1000):03d}* — making outs is basically his full-time job.",
+                "emoji": "🧱"
+            })
+
+        # 9. Ghost Runner (most triples)
+        triple_leaders = [r for r in bat_overall if safe_int(r, '3b') >= 2]
+        if triple_leaders:
+            triple_king = max(triple_leaders, key=lambda r: safe_int(r, '3b'))
+            name, team = pname(triple_king['player_id'], triple_king['team_id'])
+            oddities.append({
+                "text": f"👻 *Ghost Runner:* {name} ({team}) leads the league with *{safe_int(triple_king, '3b')} triples* — the rarest hit in baseball.",
+                "emoji": "👻"
+            })
+
+        # 10. BABIP Lottery Winner (highest BABIP, min 100 PA)
+        babip_leaders = [r for r in qualified_bat if safe_float(r, 'babip') > 0]
+        if babip_leaders:
+            babip_king = max(babip_leaders, key=lambda r: safe_float(r, 'babip'))
+            name, team = pname(babip_king['player_id'], babip_king['team_id'])
+            oddities.append({
+                "text": f"🍀 *BABIP Lottery Winner:* {name} ({team}) is batting on a *.{int(safe_float(babip_king, 'babip') * 1000):03d} BABIP* — the baseball gods are smiling on this one.",
+                "emoji": "🍀"
+            })
+
+        # 11. BABIP Victim (lowest BABIP, min 100 PA)
+        if babip_leaders:
+            babip_victim = min(babip_leaders, key=lambda r: safe_float(r, 'babip'))
+            name, team = pname(babip_victim['player_id'], babip_victim['team_id'])
+            oddities.append({
+                "text": f"🤡 *BABIP Victim:* {name} ({team}) is stranded at *.{int(safe_float(babip_victim, 'babip') * 1000):03d} BABIP* — every ball finds a glove.",
+                "emoji": "🤡"
+            })
+
+        # 12. RBI Dependent (most RBI among players with 3 or fewer HR)
+        rbi_dep = [r for r in bat_overall if safe_int(r, 'rbi') >= 15 and safe_int(r, 'hr') <= 3]
+        if rbi_dep:
+            rbi_king = max(rbi_dep, key=lambda r: safe_int(r, 'rbi'))
+            name, team = pname(rbi_king['player_id'], rbi_king['team_id'])
+            oddities.append({
+                "text": f"🤝 *RBI Dependent:* {name} ({team}) has driven in *{safe_int(rbi_king, 'rbi')} runs* with only *{safe_int(rbi_king, 'hr')} home runs* — a pure product of his lineup.",
+                "emoji": "🤝"
+            })
+
+        # 13. Caught Red-Handed (most caught stealing, min 3 CS)
+        cs_leaders = [r for r in bat_overall if safe_int(r, 'cs') >= 3]
+        if cs_leaders:
+            cs_king = max(cs_leaders, key=lambda r: safe_int(r, 'cs'))
+            sb = safe_int(cs_king, 'sb')
+            cs = safe_int(cs_king, 'cs')
+            name, team = pname(cs_king['player_id'], cs_king['team_id'])
+            oddities.append({
+                "text": f"🏃 *Caught Red-Handed:* {name} ({team}) has been thrown out *{cs} times* stealing — {sb} successes, {cs} failures. Slow down!",
+                "emoji": "🏃"
+            })
+
+        # 14. Cursed Player (top-3 in both Ks and GIDPs)
+        if len(qualified_bat) >= 3:
+            sorted_by_k = sorted(qualified_bat, key=lambda r: safe_int(r, 'k'), reverse=True)
+            sorted_by_gdp = sorted(qualified_bat, key=lambda r: safe_int(r, 'gdp'), reverse=True)
+            top_k_ids = {r['player_id'] for r in sorted_by_k[:5]}
+            top_gdp_ids = {r['player_id'] for r in sorted_by_gdp[:5]}
+            cursed_ids = top_k_ids & top_gdp_ids
+            if cursed_ids:
+                cursed_pid = list(cursed_ids)[0]
+                cursed = next(r for r in qualified_bat if r['player_id'] == cursed_pid)
+                name, team = pname(cursed['player_id'], cursed['team_id'])
+                oddities.append({
+                    "text": f"😈 *Statistically Cursed:* {name} ({team}) ranks top-5 in *both* strikeouts ({safe_int(cursed, 'k')} Ks) AND double plays grounded into ({safe_int(cursed, 'gdp')} GIDPs). An absolute menace to offenses.",
+                    "emoji": "😈"
+                })
+
     # --- Pitching oddities ---
     pitch_rows = fetch_csv(pitch_api)
     pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
@@ -573,7 +650,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🎖️"
             })
 
-        # 10. Walk problem SP (most BB, min 20 IP)
+        # 10. Walk problem SP (most BB/9, min 20 IP)
         bb_problem = max(qualified_sp, key=lambda r: safe_int(r, 'bb') / max(safe_float(r, 'ip'), 1))
         bb_per_9 = safe_int(bb_problem, 'bb') / max(safe_float(bb_problem, 'ip'), 1) * 9
         name, team = pname(bb_problem['player_id'], bb_problem['team_id'])
@@ -582,8 +659,59 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             "emoji": "😬"
         })
 
+        # 11. Gas Can (highest ERA, min 20 IP)
+        era_losers = [r for r in qualified_sp if safe_float(r, 'era') > 0]
+        if era_losers:
+            gas_can = max(era_losers, key=lambda r: safe_float(r, 'era'))
+            name, team = pname(gas_can['player_id'], gas_can['team_id'])
+            oddities.append({
+                "text": f"🛢️ *Gas Can:* {name} ({team}) is sporting a *{safe_float(gas_can, 'era'):.2f} ERA* — every run scores when this one takes the mound.",
+                "emoji": "🛢️"
+            })
+
+        # 12. Ground Ball Machine (best GO/AO ratio, min 20 IP)
+        gb_leaders = [r for r in qualified_sp if safe_int(r, 'ao') > 0]
+        if gb_leaders:
+            gb_king = max(gb_leaders, key=lambda r: safe_int(r, 'go') / max(safe_int(r, 'ao'), 1))
+            go_ao = safe_int(gb_king, 'go') / max(safe_int(gb_king, 'ao'), 1)
+            name, team = pname(gb_king['player_id'], gb_king['team_id'])
+            oddities.append({
+                "text": f"🏔️ *Worm Killer:* {name} ({team}) has a *{go_ao:.2f} GO/AO ratio* — batters just keep beating it into the dirt.",
+                "emoji": "🏔️"
+            })
+
+        # 13. Quality Start Machine (most QS)
+        qs_leaders = [r for r in qualified_sp if safe_int(r, 'qs') >= 3]
+        if qs_leaders:
+            qs_king = max(qs_leaders, key=lambda r: safe_int(r, 'qs'))
+            name, team = pname(qs_king['player_id'], qs_king['team_id'])
+            gs = safe_int(qs_king, 'gs')
+            qs = safe_int(qs_king, 'qs')
+            oddities.append({
+                "text": f"🎭 *Mr. Reliable:* {name} ({team}) has delivered *{qs} quality starts* in {gs} outings — the definition of a workhorse.",
+                "emoji": "🎭"
+            })
+
+        # 14. HR Allowed King (most HR allowed, min 20 IP)
+        hr_allowed_leaders = [r for r in qualified_sp if safe_int(r, 'hr') >= 3]
+        if hr_allowed_leaders:
+            hr_allowed_king = max(hr_allowed_leaders, key=lambda r: safe_int(r, 'hr'))
+            name, team = pname(hr_allowed_king['player_id'], hr_allowed_king['team_id'])
+            oddities.append({
+                "text": f"😤 *Home Run Derby Pitcher:* {name} ({team}) has surrendered *{safe_int(hr_allowed_king, 'hr')} home runs* — opposing hitters love facing this one.",
+                "emoji": "😤"
+            })
+
+        # 15. Innings Workhorse (most IP among starters)
+        ip_king = max(qualified_sp, key=lambda r: safe_float(r, 'ip'))
+        name, team = pname(ip_king['player_id'], ip_king['team_id'])
+        oddities.append({
+            "text": f"📦 *Iron Man:* {name} ({team}) leads all starters with *{safe_float(ip_king, 'ip'):.1f} innings pitched* — the manager's best friend.",
+            "emoji": "📦"
+        })
+
     if qualified_rp:
-        # 11. Best save% reliever
+        # 16. Best save% reliever
         sv_leaders = [r for r in qualified_rp if (safe_int(r, 's') + safe_int(r, 'bs')) >= 3]
         if sv_leaders:
             sv_king = max(sv_leaders, key=lambda r: safe_int(r, 's') / max(safe_int(r, 's') + safe_int(r, 'bs'), 1))
@@ -596,10 +724,20 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                     "emoji": "🔒"
                 })
 
-    # Shuffle for variety and cap at 4 to avoid overloading the digest
+        # 17. Blown Save King (most blown saves)
+        bs_leaders = [r for r in qualified_rp if safe_int(r, 'bs') >= 2]
+        if bs_leaders:
+            bs_king = max(bs_leaders, key=lambda r: safe_int(r, 'bs'))
+            name, team = pname(bs_king['player_id'], bs_king['team_id'])
+            oddities.append({
+                "text": f"💥 *Blown Save King:* {name} ({team}) has blown *{safe_int(bs_king, 'bs')} saves* this season — opposing managers love seeing this reliever jog in.",
+                "emoji": "💥"
+            })
+
+    # Shuffle for variety and cap at 5
     import random
     random.shuffle(oddities)
-    return oddities[:4]
+    return oddities[:5]
 
 
 if __name__ == "__main__":
