@@ -8,7 +8,7 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import time
 import sys
-from scraper import get_best_performances, get_milestones, get_team_momentum, get_team_luck, get_close_division_races, get_notable_games, get_api_oddities
+from scraper import get_best_performances, get_headlines_and_milestones, get_team_momentum, get_team_luck, get_close_division_races, get_notable_games, get_api_oddities
 
 # Load environment variables
 load_dotenv()
@@ -128,30 +128,23 @@ def build_performance_blocks(performance, title):
     blocks.append({"type": "divider"})
     return blocks
 
-def build_milestones_blocks(milestones):
-    if not milestones:
+def build_headlines_blocks(headlines):
+    if not headlines:
         return []
+        
+    headlines_text = "\n".join([f"• {h}" for h in headlines])
         
     blocks = [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "🏆 *Sim Highlights & Milestones*"
+                "text": f"🏆 *Sim Highlights & Headlines*\n{headlines_text}"
             }
-        }
+        },
+        {"type": "divider"}
     ]
     
-    for milestone in milestones:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"• *{milestone['name']}* ({milestone['team']}) reached *{milestone['amount']} {milestone['stat']}*"
-            }
-        })
-        
-    blocks.append({"type": "divider"})
     return blocks
 
 def build_analytics_blocks(hottest, coldest, luckiest, unluckiest):
@@ -294,8 +287,8 @@ def trigger_daily_digest():
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
     
-    print(f"Fetching milestones from StatsPlus recap...")
-    milestones = get_milestones(LEAGUE_URL)
+    print(f"Fetching headlines from StatsPlus recap...")
+    headlines = get_headlines_and_milestones(LEAGUE_URL)
     
     print(f"Fetching team analytics...")
     hottest, coldest = get_team_momentum(LEAGUE_URL)
@@ -313,8 +306,8 @@ def trigger_daily_digest():
     summary_parts = []
     if best_pitcher or best_batter:
         summary_parts.append("Play of the Week")
-    if milestones:
-        summary_parts.append(f"{len(milestones)} Milestones")
+    if headlines:
+        summary_parts.append(f"{len(headlines)} Headlines")
     if hottest:
         summary_parts.append("Team Analytics")
     if races:
@@ -334,8 +327,8 @@ def trigger_daily_digest():
         all_blocks.extend(build_performance_blocks(best_pitcher, "Pitcher of the Sim"))
     if best_batter:
         all_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
-    if milestones:
-        all_blocks.extend(build_milestones_blocks(milestones))
+    if headlines:
+        all_blocks.extend(build_headlines_blocks(headlines))
     if hottest and luckiest:
         all_blocks.extend(build_analytics_blocks(hottest, coldest, luckiest, unluckiest))
     if api_oddities:
@@ -352,8 +345,12 @@ def trigger_daily_digest():
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
 
-@app.message(re.compile(r"StatsPlus.*updated", re.IGNORECASE))
+@app.message(re.compile(r"StatsPlus website has been updated", re.IGNORECASE))
 def handle_sim_complete(message, say):
+    if message.get("subtype") == "message_changed":
+        print("Ignoring message_changed event to prevent duplicate triggers.")
+        return
+
     print(f"✅ MATCH FOUND: {message.get('text')}")
     print("🚀 Detected StatsPlus update message! Waiting 3 minutes before scraping...")
     

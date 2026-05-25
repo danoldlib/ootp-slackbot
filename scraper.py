@@ -118,7 +118,7 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
     print(f"Could not find a performance in the timeframe among the listed games.")
     return None
 
-def get_milestones(league_url="https://statsplus.net/xfbl"):
+def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl"):
     recap_url = f"{league_url.rstrip('/')}/recap/"
     try:
         response = requests.get(recap_url)
@@ -127,13 +127,15 @@ def get_milestones(league_url="https://statsplus.net/xfbl"):
         print(f"Error fetching recap page: {e}")
         return []
     
-    milestones = []
+    headlines = []
     panel = soup.find(id='recap-msg-panel')
     if not panel:
-        return milestones
+        return headlines
         
     for div in panel.find_all('div', class_='smallfont oneline'):
         text = " ".join(div.text.split())
+        
+        # 1. Career Milestones
         match = re.search(r'reached (\d+) ([a-z\s]+)', text, re.IGNORECASE)
         if match:
             amount = int(match.group(1))
@@ -160,14 +162,35 @@ def get_milestones(league_url="https://statsplus.net/xfbl"):
                 if name_match:
                     name = name_match.group(1).strip()
                     team = name_match.group(2).strip()
-                    milestones.append({
-                        "name": name,
-                        "team": team,
-                        "amount": amount,
-                        "stat": stat,
-                        "full_text": text
-                    })
-    return milestones
+                    headlines.append(f"🎖️ *{name}* ({team}) reached *{amount:,} {stat}*.")
+            continue
+            
+        # 2. Rare Feats & Special Events
+        name_match = re.search(r'^[A-Z0-9]{1,2} ([^\(]+) \(([A-Z]+)\)', text)
+        if name_match:
+            name = name_match.group(1).strip()
+            team = name_match.group(2).strip()
+            
+            if re.search(r'NO-HITTER', text):
+                headlines.append(f"🎩 *NO-HITTER Alert*: {name} ({team}) threw a no-hitter!")
+            elif re.search(r'PERFECT GAME', text):
+                headlines.append(f"👑 *PERFECT GAME Alert*: {name} ({team}) threw a perfect game!")
+            elif re.search(r'hits for the CYCLE', text, re.IGNORECASE):
+                headlines.append(f"🚲 *Cycle Watch*: {name} ({team}) hit for the cycle!")
+            elif re.search(r'WALK-OFF|walk-off', text):
+                headlines.append(f"🚨 *Walk-off Magic*: {name} ({team}) delivered a walk-off hit!")
+            elif re.search(r'Major League debut|MLB debut', text, re.IGNORECASE):
+                headlines.append(f"👶 *Prospect Watch*: {name} ({team}) made his Major League debut.")
+
+    # Deduplicate headlines while preserving order
+    seen = set()
+    deduped = []
+    for h in headlines:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+            
+    return deduped
 
 TEAM_MAPPING = {
     "ANA": "Anaheim Angels", "ARI": "Arizona Diamondbacks", "ATL": "Atlanta Braves",
