@@ -345,10 +345,16 @@ def trigger_daily_digest():
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
 
-@app.message(re.compile(r"StatsPlus website has been updated", re.IGNORECASE))
+@app.message(re.compile(r"StatsPlus website.*has been updated", re.IGNORECASE))
 def handle_sim_complete(message, say):
     if message.get("subtype") == "message_changed":
         print("Ignoring message_changed event to prevent duplicate triggers.")
+        return
+
+    # Ensure it's actually from the StatsPlus bot if a bot sent it
+    bot_name = message.get("username") or message.get("bot_profile", {}).get("name")
+    if bot_name and "statsplus" not in bot_name.lower():
+        print(f"Ignoring message from non-StatsPlus bot: {bot_name}")
         return
 
     print(f"✅ MATCH FOUND: {message.get('text')}")
