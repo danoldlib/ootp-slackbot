@@ -431,6 +431,11 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
     Uses the StatsPlus CSV API to mine for funny, odd, and noteworthy
     season-level stats. Returns a list of oddity dicts with 'text' and 'emoji'.
     Only uses split_id=1 (overall stats).
+
+    Uses smart rotation: each category is keyed by a stable name. The bot
+    tracks which categories were shown last sim (via state.json) and prefers
+    categories that haven't appeared recently, and players who haven't won
+    the same category back-to-back.
     """
     import csv
     import io
@@ -444,15 +449,12 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
         try:
             resp = requests.get(url, timeout=15)
             resp.raise_for_status()
-            # Strip blank lines, which the API sometimes includes
             text = "\n".join(line for line in resp.text.splitlines() if line.strip())
             return list(csv.DictReader(io.StringIO(text)))
         except Exception as e:
             print(f"API fetch failed for {url}: {e}")
             return []
 
-    # Build lookup dicts
-    # Players API cols: ID, First Name, Last Name
     player_rows = fetch_csv(players_api)
     player_names = {}
     for r in player_rows:
@@ -462,26 +464,21 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
         if pid:
             player_names[pid] = f"{first} {last}".strip()
 
-    # Teams API cols: ID, Name, Nickname
     team_rows = fetch_csv(teams_api)
     team_display = {}
     for r in team_rows:
         tid = r.get('ID', '').strip()
         name = r.get('Name', '').strip()
-        nick = r.get('Nickname', '').strip()
         if tid:
-            # Use short city name as the display label (e.g. "Cincinnati")
             team_display[tid] = name
 
     def pname(pid, tid):
         return player_names.get(str(pid), f"Player#{pid}"), team_display.get(str(tid), f"T{tid}")
 
-    # --- Batting oddities ---
     bat_rows = fetch_csv(bat_api)
-    # Only use overall split (split_id == '1')
     bat_overall = [r for r in bat_rows if r.get('split_id') == '1']
 
-    oddities = []
+    all_oddities = {}
 
     def safe_int(d, key, default=0):
         try: return int(d.get(key, default) or default)
@@ -491,50 +488,53 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
         try: return float(d.get(key, default) or default)
         except: return default
 
-    # Qualified batters: at least 100 PA
     qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= 100]
 
     if qualified_bat:
-        # 1. K-rate King (most K per PA)
         k_king = max(qualified_bat, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'pa'), 1))
         k_rate = safe_int(k_king, 'k') / max(safe_int(k_king, 'pa'), 1)
         name, team = pname(k_king['player_id'], k_king['team_id'])
-        oddities.append({
+        all_oddities["k_rate_king"] = {
             "text": f"🎳 *K-Rate King:* {name} ({team}) strikes out *{k_rate:.0%}* of the time — {safe_int(k_king, 'k')} Ks in {safe_int(k_king, 'pa')} PA.",
-            "emoji": "🎳"
-        })
+            "emoji": "🎳", "winner_id": k_king['player_id']
+        }
 
-        # 2. Walk Machine (most BB per PA)
         bb_king = max(qualified_bat, key=lambda r: safe_int(r, 'bb') / max(safe_int(r, 'pa'), 1))
         bb_rate = safe_int(bb_king, 'bb') / max(safe_int(bb_king, 'pa'), 1)
         name, team = pname(bb_king['player_id'], bb_king['team_id'])
-        oddities.append({
+        all_oddities["walk_machine"] = {
             "text": f"🚶 *Walk Machine:* {name} ({team}) draws a walk *{bb_rate:.0%}* of the time — {safe_int(bb_king, 'bb')} BBs this season.",
-            "emoji": "🚶"
-        })
+            "emoji": "🚶", "winner_id": bb_king['player_id']
+        }
 
-        # 3. GIDP Machine (most double plays grounded into, min 10)
         gdp_leaders = [r for r in bat_overall if safe_int(r, 'gdp') >= 5]
         if gdp_leaders:
             gdp_king = max(gdp_leaders, key=lambda r: safe_int(r, 'gdp'))
             name, team = pname(gdp_king['player_id'], gdp_king['team_id'])
-            oddities.append({
+            all_oddities["gidp_machine"] = {
                 "text": f"💀 *Double Play Machine:* {name} ({team}) has grounded into *{safe_int(gdp_king, 'gdp')} double plays* — the league's premier rally killer.",
-                "emoji": "💀"
-            })
+                "emoji": "💀", "winner_id": gdp_king['player_id']
+            }
 
-        # 4. Best HR/AB rate among batters with at least 50 AB and 5 HR
         hr_rate_leaders = [r for r in bat_overall if safe_int(r, 'ab') >= 50 and safe_int(r, 'hr') >= 5]
         if hr_rate_leaders:
             hr_king = max(hr_rate_leaders, key=lambda r: safe_int(r, 'hr') / max(safe_int(r, 'ab'), 1))
             ab_per_hr = safe_int(hr_king, 'ab') / safe_int(hr_king, 'hr')
             name, team = pname(hr_king['player_id'], hr_king['team_id'])
-            oddities.append({
+            all_oddities["hr_freak"] = {
                 "text": f"💣 *HR Freak:* {name} ({team}) is going yard every *{ab_per_hr:.1f} ABs* with {safe_int(hr_king, 'hr')} homers already.",
-                "emoji": "💣"
-            })
+                "emoji": "💣", "winner_id": hr_king['player_id']
+            }
 
-        # 5. Stolen base leader
+        hr_raw_leaders = [r for r in bat_overall if safe_int(r, 'hr') >= 5]
+        if hr_raw_leaders:
+            hr_raw_king = max(hr_raw_leaders, key=lambda r: safe_int(r, 'hr'))
+            name, team = pname(hr_raw_king['player_id'], hr_raw_king['team_id'])
+            all_oddities["hr_king"] = {
+                "text": f"🏡 *Home Run King:* {name} ({team}) leads the league with *{safe_int(hr_raw_king, 'hr')} home runs* on the season.",
+                "emoji": "🏡", "winner_id": hr_raw_king['player_id']
+            }
+
         sb_leaders = [r for r in bat_overall if safe_int(r, 'sb') >= 5]
         if sb_leaders:
             sb_king = max(sb_leaders, key=lambda r: safe_int(r, 'sb'))
@@ -542,93 +542,93 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             sb = safe_int(sb_king, 'sb')
             pct = sb / max(sb + cs, 1)
             name, team = pname(sb_king['player_id'], sb_king['team_id'])
-            oddities.append({
+            all_oddities["speed_demon"] = {
                 "text": f"🔫 *Speed Demon:* {name} ({team}) leads the league with *{sb} steals* (success rate: {pct:.0%}).",
-                "emoji": "🔫"
-            })
+                "emoji": "🔫", "winner_id": sb_king['player_id']
+            }
 
-        # 6. Best WAR batter
         war_leaders = [r for r in bat_overall if safe_float(r, 'war') > 0]
         if war_leaders:
             war_king = max(war_leaders, key=lambda r: safe_float(r, 'war'))
             name, team = pname(war_king['player_id'], war_king['team_id'])
-            oddities.append({
+            all_oddities["bat_war_leader"] = {
                 "text": f"🏆 *Position Player WAR Leader:* {name} ({team}) paces the league with *{safe_float(war_king, 'war'):.1f} WAR*.",
-                "emoji": "🏆"
-            })
+                "emoji": "🏆", "winner_id": war_king['player_id']
+            }
 
-        # 7. Worst WPA batter (most negative, blame game)
         wpa_losers = [r for r in bat_overall if safe_float(r, 'wpa') < -0.5 and safe_int(r, 'pa') >= 100]
         if wpa_losers:
             wpa_loser = min(wpa_losers, key=lambda r: safe_float(r, 'wpa'))
             name, team = pname(wpa_loser['player_id'], wpa_loser['team_id'])
-            oddities.append({
+            all_oddities["clutch_kryptonite"] = {
                 "text": f"📉 *Clutch Kryptonite:* {name} ({team}) has been absolutely *crushing his team's win probability* with {safe_float(wpa_loser, 'wpa'):.2f} WPA.",
-                "emoji": "📉"
-            })
+                "emoji": "📉", "winner_id": wpa_loser['player_id']
+            }
 
-        # 8. Human Out (lowest batting average, min 100 PA)
         avg_losers = [r for r in qualified_bat if safe_float(r, 'avg') > 0]
         if avg_losers:
             avg_loser = min(avg_losers, key=lambda r: safe_float(r, 'avg'))
             name, team = pname(avg_loser['player_id'], avg_loser['team_id'])
-            oddities.append({
+            all_oddities["human_out"] = {
                 "text": f"🧱 *Human Out:* {name} ({team}) is hitting a paltry *.{int(safe_float(avg_loser, 'avg') * 1000):03d}* — making outs is basically his full-time job.",
-                "emoji": "🧱"
-            })
+                "emoji": "🧱", "winner_id": avg_loser['player_id']
+            }
 
-        # 9. Ghost Runner (most triples)
+        contact_leaders = sorted(qualified_bat, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'pa'), 1))
+        if contact_leaders:
+            contact_king = contact_leaders[0]
+            k_rate_low = safe_int(contact_king, 'k') / max(safe_int(contact_king, 'pa'), 1)
+            name, team = pname(contact_king['player_id'], contact_king['team_id'])
+            all_oddities["contact_machine"] = {
+                "text": f"🎯 *Contact Machine:* {name} ({team}) only strikes out *{k_rate_low:.0%}* of the time — {safe_int(contact_king, 'k')} Ks in {safe_int(contact_king, 'pa')} PA. Old-school baseball.",
+                "emoji": "🎯", "winner_id": contact_king['player_id']
+            }
+
         triple_leaders = [r for r in bat_overall if safe_int(r, '3b') >= 2]
         if triple_leaders:
             triple_king = max(triple_leaders, key=lambda r: safe_int(r, '3b'))
             name, team = pname(triple_king['player_id'], triple_king['team_id'])
-            oddities.append({
+            all_oddities["ghost_runner"] = {
                 "text": f"👻 *Ghost Runner:* {name} ({team}) leads the league with *{safe_int(triple_king, '3b')} triples* — the rarest hit in baseball.",
-                "emoji": "👻"
-            })
+                "emoji": "👻", "winner_id": triple_king['player_id']
+            }
 
-        # 10. BABIP Lottery Winner (highest BABIP, min 100 PA)
         babip_leaders = [r for r in qualified_bat if safe_float(r, 'babip') > 0]
         if babip_leaders:
             babip_king = max(babip_leaders, key=lambda r: safe_float(r, 'babip'))
             name, team = pname(babip_king['player_id'], babip_king['team_id'])
-            oddities.append({
+            all_oddities["babip_winner"] = {
                 "text": f"🍀 *BABIP Lottery Winner:* {name} ({team}) is batting on a *.{int(safe_float(babip_king, 'babip') * 1000):03d} BABIP* — the baseball gods are smiling on this one.",
-                "emoji": "🍀"
-            })
+                "emoji": "🍀", "winner_id": babip_king['player_id']
+            }
 
-        # 11. BABIP Victim (lowest BABIP, min 100 PA)
-        if babip_leaders:
             babip_victim = min(babip_leaders, key=lambda r: safe_float(r, 'babip'))
             name, team = pname(babip_victim['player_id'], babip_victim['team_id'])
-            oddities.append({
+            all_oddities["babip_victim"] = {
                 "text": f"🤡 *BABIP Victim:* {name} ({team}) is stranded at *.{int(safe_float(babip_victim, 'babip') * 1000):03d} BABIP* — every ball finds a glove.",
-                "emoji": "🤡"
-            })
+                "emoji": "🤡", "winner_id": babip_victim['player_id']
+            }
 
-        # 12. RBI Dependent (most RBI among players with 3 or fewer HR)
         rbi_dep = [r for r in bat_overall if safe_int(r, 'rbi') >= 15 and safe_int(r, 'hr') <= 3]
         if rbi_dep:
             rbi_king = max(rbi_dep, key=lambda r: safe_int(r, 'rbi'))
             name, team = pname(rbi_king['player_id'], rbi_king['team_id'])
-            oddities.append({
+            all_oddities["rbi_dependent"] = {
                 "text": f"🤝 *RBI Dependent:* {name} ({team}) has driven in *{safe_int(rbi_king, 'rbi')} runs* with only *{safe_int(rbi_king, 'hr')} home runs* — a pure product of his lineup.",
-                "emoji": "🤝"
-            })
+                "emoji": "🤝", "winner_id": rbi_king['player_id']
+            }
 
-        # 13. Caught Red-Handed (most caught stealing, min 3 CS)
         cs_leaders = [r for r in bat_overall if safe_int(r, 'cs') >= 3]
         if cs_leaders:
             cs_king = max(cs_leaders, key=lambda r: safe_int(r, 'cs'))
             sb = safe_int(cs_king, 'sb')
             cs = safe_int(cs_king, 'cs')
             name, team = pname(cs_king['player_id'], cs_king['team_id'])
-            oddities.append({
+            all_oddities["caught_stealing"] = {
                 "text": f"🏃 *Caught Red-Handed:* {name} ({team}) has been thrown out *{cs} times* stealing — {sb} successes, {cs} failures. Slow down!",
-                "emoji": "🏃"
-            })
+                "emoji": "🏃", "winner_id": cs_king['player_id']
+            }
 
-        # 14. Cursed Player (top-3 in both Ks and GIDPs)
         if len(qualified_bat) >= 3:
             sorted_by_k = sorted(qualified_bat, key=lambda r: safe_int(r, 'k'), reverse=True)
             sorted_by_gdp = sorted(qualified_bat, key=lambda r: safe_int(r, 'gdp'), reverse=True)
@@ -639,102 +639,108 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 cursed_pid = list(cursed_ids)[0]
                 cursed = next(r for r in qualified_bat if r['player_id'] == cursed_pid)
                 name, team = pname(cursed['player_id'], cursed['team_id'])
-                oddities.append({
+                all_oddities["statistically_cursed"] = {
                     "text": f"😈 *Statistically Cursed:* {name} ({team}) ranks top-5 in *both* strikeouts ({safe_int(cursed, 'k')} Ks) AND double plays grounded into ({safe_int(cursed, 'gdp')} GIDPs). An absolute menace to offenses.",
-                    "emoji": "😈"
-                })
+                    "emoji": "😈", "winner_id": cursed['player_id']
+                }
 
-    # --- Pitching oddities ---
     pitch_rows = fetch_csv(pitch_api)
     pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
 
-    # Qualified starters: min 20 IP, at least 3 GS
     qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 20 and safe_int(r, 'gs') >= 3]
-    # Qualified relievers: min 10 IP, 0 GS
     qualified_rp = [r for r in pitch_overall if safe_float(r, 'ip') >= 10 and safe_int(r, 'gs') == 0]
 
     if qualified_sp:
-        # 8. K/BF king (strikeout rate among starters)
         k_bf_king = max(qualified_sp, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'bf'), 1))
         k_bf_rate = safe_int(k_bf_king, 'k') / max(safe_int(k_bf_king, 'bf'), 1)
         name, team = pname(k_bf_king['player_id'], k_bf_king['team_id'])
-        oddities.append({
+        all_oddities["swing_miss_sp"] = {
             "text": f"🔥 *Swing-and-Miss SP:* {name} ({team}) is fanning *{k_bf_rate:.0%}* of batters faced — a terrifying arm.",
-            "emoji": "🔥"
-        })
+            "emoji": "🔥", "winner_id": k_bf_king['player_id']
+        }
 
-        # 9. Best WAR pitcher
         war_leaders_p = [r for r in pitch_overall if safe_float(r, 'war') > 0]
         if war_leaders_p:
             war_king_p = max(war_leaders_p, key=lambda r: safe_float(r, 'war'))
             name, team = pname(war_king_p['player_id'], war_king_p['team_id'])
-            oddities.append({
+            all_oddities["pitch_war_leader"] = {
                 "text": f"🎖️ *Pitcher WAR Leader:* {name} ({team}) leads all arms with *{safe_float(war_king_p, 'war'):.1f} WAR*.",
-                "emoji": "🎖️"
-            })
+                "emoji": "🎖️", "winner_id": war_king_p['player_id']
+            }
 
-        # 10. Walk problem SP (most BB/9, min 20 IP)
         bb_problem = max(qualified_sp, key=lambda r: safe_int(r, 'bb') / max(safe_float(r, 'ip'), 1))
         bb_per_9 = safe_int(bb_problem, 'bb') / max(safe_float(bb_problem, 'ip'), 1) * 9
         name, team = pname(bb_problem['player_id'], bb_problem['team_id'])
-        oddities.append({
+        all_oddities["control_issues"] = {
             "text": f"😬 *Control Issues:* {name} ({team}) is issuing *{bb_per_9:.1f} walks per 9 innings* — somebody get them the strike zone.",
-            "emoji": "😬"
-        })
+            "emoji": "😬", "winner_id": bb_problem['player_id']
+        }
 
-        # 11. Gas Can (highest ERA, min 20 IP)
+        kb_ratio_leaders = [r for r in qualified_sp if safe_int(r, 'bb') > 0]
+        if kb_ratio_leaders:
+            kb_king = max(kb_ratio_leaders, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'bb'), 1))
+            kb_ratio = safe_int(kb_king, 'k') / max(safe_int(kb_king, 'bb'), 1)
+            name, team = pname(kb_king['player_id'], kb_king['team_id'])
+            all_oddities["kb_ratio_king"] = {
+                "text": f"🧊 *K/BB Ratio King:* {name} ({team}) strikes out *{kb_ratio:.1f} batters for every walk* — the gold standard of command.",
+                "emoji": "🧊", "winner_id": kb_king['player_id']
+            }
+
         era_losers = [r for r in qualified_sp if safe_float(r, 'era') > 0]
         if era_losers:
             gas_can = max(era_losers, key=lambda r: safe_float(r, 'era'))
             name, team = pname(gas_can['player_id'], gas_can['team_id'])
-            oddities.append({
+            all_oddities["gas_can"] = {
                 "text": f"🛢️ *Gas Can:* {name} ({team}) is sporting a *{safe_float(gas_can, 'era'):.2f} ERA* — every run scores when this one takes the mound.",
-                "emoji": "🛢️"
-            })
+                "emoji": "🛢️", "winner_id": gas_can['player_id']
+            }
 
-        # 12. Ground Ball Machine (best GO/AO ratio, min 20 IP)
         gb_leaders = [r for r in qualified_sp if safe_int(r, 'ao') > 0]
         if gb_leaders:
             gb_king = max(gb_leaders, key=lambda r: safe_int(r, 'go') / max(safe_int(r, 'ao'), 1))
             go_ao = safe_int(gb_king, 'go') / max(safe_int(gb_king, 'ao'), 1)
             name, team = pname(gb_king['player_id'], gb_king['team_id'])
-            oddities.append({
+            all_oddities["worm_killer"] = {
                 "text": f"🏔️ *Worm Killer:* {name} ({team}) has a *{go_ao:.2f} GO/AO ratio* — batters just keep beating it into the dirt.",
-                "emoji": "🏔️"
-            })
+                "emoji": "🏔️", "winner_id": gb_king['player_id']
+            }
 
-        # 13. Quality Start Machine (most QS)
         qs_leaders = [r for r in qualified_sp if safe_int(r, 'qs') >= 3]
         if qs_leaders:
             qs_king = max(qs_leaders, key=lambda r: safe_int(r, 'qs'))
             name, team = pname(qs_king['player_id'], qs_king['team_id'])
             gs = safe_int(qs_king, 'gs')
             qs = safe_int(qs_king, 'qs')
-            oddities.append({
+            all_oddities["mr_reliable"] = {
                 "text": f"🎭 *Mr. Reliable:* {name} ({team}) has delivered *{qs} quality starts* in {gs} outings — the definition of a workhorse.",
-                "emoji": "🎭"
-            })
+                "emoji": "🎭", "winner_id": qs_king['player_id']
+            }
 
-        # 14. HR Allowed King (most HR allowed, min 20 IP)
         hr_allowed_leaders = [r for r in qualified_sp if safe_int(r, 'hr') >= 3]
         if hr_allowed_leaders:
             hr_allowed_king = max(hr_allowed_leaders, key=lambda r: safe_int(r, 'hr'))
             name, team = pname(hr_allowed_king['player_id'], hr_allowed_king['team_id'])
-            oddities.append({
+            all_oddities["hr_derby_pitcher"] = {
                 "text": f"😤 *Home Run Derby Pitcher:* {name} ({team}) has surrendered *{safe_int(hr_allowed_king, 'hr')} home runs* — opposing hitters love facing this one.",
-                "emoji": "😤"
-            })
+                "emoji": "😤", "winner_id": hr_allowed_king['player_id']
+            }
 
-        # 15. Innings Workhorse (most IP among starters)
         ip_king = max(qualified_sp, key=lambda r: safe_float(r, 'ip'))
         name, team = pname(ip_king['player_id'], ip_king['team_id'])
-        oddities.append({
+        all_oddities["iron_man"] = {
             "text": f"📦 *Iron Man:* {name} ({team}) leads all starters with *{safe_float(ip_king, 'ip'):.1f} innings pitched* — the manager's best friend.",
-            "emoji": "📦"
-        })
+            "emoji": "📦", "winner_id": ip_king['player_id']
+        }
+
+        if qualified_rp:
+            rp_workhorse = max(qualified_rp, key=lambda r: safe_int(r, 'g'))
+            name, team = pname(rp_workhorse['player_id'], rp_workhorse['team_id'])
+            all_oddities["bullpen_burnout"] = {
+                "text": f"🎪 *Bullpen Burnout:* {name} ({team}) has appeared in *{safe_int(rp_workhorse, 'g')} games* out of the pen — their arm must be held together with tape.",
+                "emoji": "🎪", "winner_id": rp_workhorse['player_id']
+            }
 
     if qualified_rp:
-        # 16. Best save% reliever
         sv_leaders = [r for r in qualified_rp if (safe_int(r, 's') + safe_int(r, 'bs')) >= 3]
         if sv_leaders:
             sv_king = max(sv_leaders, key=lambda r: safe_int(r, 's') / max(safe_int(r, 's') + safe_int(r, 'bs'), 1))
@@ -742,25 +748,521 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             bsv = safe_int(sv_king, 'bs')
             name, team = pname(sv_king['player_id'], sv_king['team_id'])
             if svs > 0:
-                oddities.append({
+                all_oddities["closer_of_year"] = {
                     "text": f"🔒 *Closer of the Year:* {name} ({team}) has been *{svs}-for-{svs+bsv}* in save opportunities.",
-                    "emoji": "🔒"
-                })
+                    "emoji": "🔒", "winner_id": sv_king['player_id']
+                }
 
-        # 17. Blown Save King (most blown saves)
         bs_leaders = [r for r in qualified_rp if safe_int(r, 'bs') >= 2]
         if bs_leaders:
             bs_king = max(bs_leaders, key=lambda r: safe_int(r, 'bs'))
             name, team = pname(bs_king['player_id'], bs_king['team_id'])
-            oddities.append({
+            all_oddities["blown_save_king"] = {
                 "text": f"💥 *Blown Save King:* {name} ({team}) has blown *{safe_int(bs_king, 'bs')} saves* this season — opposing managers love seeing this reliever jog in.",
-                "emoji": "💥"
-            })
+                "emoji": "💥", "winner_id": bs_king['player_id']
+            }
 
-    # Shuffle for variety and cap at 5
     import random
-    random.shuffle(oddities)
-    return oddities[:5]
+    import json
+    import os
+
+    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+    try:
+        with open(state_path, "r") as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+
+    recently_shown = set(state.get("last_oddity_categories", []))
+    last_winners = state.get("last_oddity_winners", {})
+
+    available_keys = list(all_oddities.keys())
+    fresh_keys = [k for k in available_keys if k not in recently_shown]
+    stale_keys = [k for k in available_keys if k in recently_shown]
+
+    def pick_key(pool):
+        repeat_winner_keys = [k for k in pool if all_oddities[k].get("winner_id") == last_winners.get(k)]
+        non_repeat_keys = [k for k in pool if k not in repeat_winner_keys]
+        return non_repeat_keys if non_repeat_keys else pool
+
+    random.shuffle(fresh_keys)
+    random.shuffle(stale_keys)
+
+    fresh_to_use = pick_key(fresh_keys)
+    stale_to_use = pick_key(stale_keys)
+    ordered_keys = fresh_to_use + stale_to_use
+    chosen_keys = ordered_keys[:5]
+
+    new_winners = {k: all_oddities[k].get("winner_id") for k in chosen_keys}
+    state["last_oddity_categories"] = chosen_keys
+    state["last_oddity_winners"] = {**last_winners, **new_winners}
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save state: {e}")
+
+    return [all_oddities[k] for k in chosen_keys]
+
+
+def get_sim_analytics(league_url="https://statsplus.net/xfbl"):
+    """
+    Returns analytics data for the Sim Analytics section.
+    Rotates between three different storyline modes each sim:
+      - Mode 0: Standard — Who's Hot/Cold (ELO) + Luckiest/Unluckiest (BaseRuns)
+      - Mode 1: Rankings Shakeup — Biggest ELO movers + Luckiest/Unluckiest
+      - Mode 2: Luck Focus — Lead with BaseRuns luck, Hot/Cold as secondary context
+    State is persisted in state.json.
+    """
+    import json
+    import os
+
+    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+    try:
+        with open(state_path, "r") as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+
+    current_mode = state.get("analytics_mode", 0)
+    next_mode = (current_mode + 1) % 3
+    state["analytics_mode"] = next_mode
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save analytics state: {e}")
+
+    hottest, coldest = get_team_momentum(league_url)
+    luckiest, unluckiest = get_team_luck(league_url)
+
+    if current_mode == 0:
+        return {
+            "mode": "standard",
+            "hottest": hottest,
+            "coldest": coldest,
+            "luckiest": luckiest,
+            "unluckiest": unluckiest,
+        }
+    elif current_mode == 1:
+        elo_url = f"{league_url.rstrip('/')}/elo/current/"
+        biggest_gainer = hottest
+        biggest_loser = coldest
+        try:
+            response = requests.get(elo_url)
+            soup = BeautifulSoup(response.text, 'html.parser')
+            table = soup.find('table')
+            if table:
+                teams_elo = []
+                for row in table.find_all('tr')[1:]:
+                    cols = [td.text.strip() for td in row.find_all('td')]
+                    if len(cols) > 9:
+                        team_name = get_full_team_name(cols[1])
+                        try:
+                            momentum = float(cols[9])
+                            teams_elo.append({"team": team_name, "change": momentum})
+                        except ValueError:
+                            pass
+                if teams_elo:
+                    teams_elo.sort(key=lambda x: x['change'])
+                    biggest_loser = teams_elo[0]
+                    biggest_gainer = teams_elo[-1]
+        except Exception as e:
+            print(f"Error fetching ELO shakeup data: {e}")
+
+        return {
+            "mode": "rankings_shakeup",
+            "biggest_gainer": biggest_gainer,
+            "biggest_loser": biggest_loser,
+            "luckiest": luckiest,
+            "unluckiest": unluckiest,
+        }
+    else:
+        return {
+            "mode": "luck_focus",
+            "hottest": hottest,
+            "coldest": coldest,
+            "luckiest": luckiest,
+            "unluckiest": unluckiest,
+        }
+
+
+
+def get_streaks_and_records(league_url, state):
+    """
+    Detects multi-sim team streaks and season stat records.
+
+    Uses state['elo_history'] to track each team's last 3 ELO changes, and
+    state['season_records'] to track season highs for key stats.
+
+    Returns a list of callout strings to inject into the analytics section.
+    """
+    import csv
+    import io
+
+    callouts = []
+
+    # --- Team Streaks via ELO history ---
+    elo_url = f"{league_url.rstrip('/')}/elo/current/"
+    try:
+        response = requests.get(elo_url, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table')
+        if table:
+            elo_history = state.get("elo_history", {})
+            for row in table.find_all('tr')[1:]:
+                cols = [td.text.strip() for td in row.find_all('td')]
+                if len(cols) > 9:
+                    team_name = get_full_team_name(cols[1])
+                    try:
+                        change = float(cols[9])
+                    except ValueError:
+                        continue
+                    history = elo_history.get(team_name, [])
+                    history.append(change)
+                    elo_history[team_name] = history[-4:]  # keep last 4 sims
+
+            state["elo_history"] = elo_history
+
+            # Find teams on a hot/cold streak (3+ consecutive positive/negative)
+            for team, history in elo_history.items():
+                if len(history) >= 3:
+                    recent = history[-3:]
+                    if all(x > 0 for x in recent):
+                        streak_len = len(history)
+                        # Count from the end how many consecutive positives
+                        streak_len = 0
+                        for x in reversed(history):
+                            if x > 0:
+                                streak_len += 1
+                            else:
+                                break
+                        if streak_len >= 3:
+                            callouts.append(f"🔥 *Hot Streak:* The *{team}* have gained ELO in *{streak_len} straight sims* — the league's hottest team right now.")
+                    elif all(x < 0 for x in recent):
+                        streak_len = 0
+                        for x in reversed(history):
+                            if x < 0:
+                                streak_len += 1
+                            else:
+                                break
+                        if streak_len >= 3:
+                            callouts.append(f"🧊 *Cold Streak:* The *{team}* have lost ELO in *{streak_len} straight sims* — in a serious funk.")
+    except Exception as e:
+        print(f"Error computing streaks: {e}")
+
+    # --- Season Records via batting/pitching API ---
+    bat_api = f"{league_url}/api/playerbatstatsv2/"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
+    players_api = f"{league_url}/api/players/"
+
+    def fetch_csv(url):
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            text = "\n".join(line for line in resp.text.splitlines() if line.strip())
+            return list(csv.DictReader(io.StringIO(text)))
+        except Exception as e:
+            print(f"API fetch failed for {url}: {e}")
+            return []
+
+    def safe_int(d, key, default=0):
+        try: return int(d.get(key, default) or default)
+        except: return default
+
+    def safe_float(d, key, default=0.0):
+        try: return float(d.get(key, default) or default)
+        except: return default
+
+    player_rows = fetch_csv(players_api)
+    player_names = {}
+    for r in player_rows:
+        pid = r.get('ID', '').strip()
+        first = r.get('First Name', '').strip()
+        last = r.get('Last Name', '').strip()
+        if pid:
+            player_names[pid] = f"{first} {last}".strip()
+
+    def pname(pid):
+        return player_names.get(str(pid), f"Player#{pid}")
+
+    bat_rows = fetch_csv(bat_api)
+    bat_overall = [r for r in bat_rows if r.get('split_id') == '1']
+    pitch_rows = fetch_csv(pitch_api)
+    pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
+
+    season_records = state.get("season_records", {})
+
+    def check_record(key, player_name, value, emoji, label, higher_is_better=True):
+        """Check if value is a new season record; returns callout string or None."""
+        prev = season_records.get(key, {})
+        prev_val = prev.get("value")
+        is_new = prev_val is None or (higher_is_better and value > prev_val) or (not higher_is_better and value < prev_val)
+        if is_new:
+            season_records[key] = {"player": player_name, "value": value}
+            if prev_val is not None:
+                return f"{emoji} *New Season High!* {player_name} now leads the league in {label} with *{value}* (previous best: {prev_val})."
+        return None
+
+    # Check HR leader
+    if bat_overall:
+        hr_leader = max(bat_overall, key=lambda r: safe_int(r, 'hr'))
+        hr_val = safe_int(hr_leader, 'hr')
+        if hr_val > 0:
+            note = check_record("most_hr", pname(hr_leader['player_id']), hr_val, "💣", "home runs")
+            if note:
+                callouts.append(note)
+
+    # Check strikeout leader (pitchers)
+    if pitch_overall:
+        k_leader = max(pitch_overall, key=lambda r: safe_int(r, 'k'))
+        k_val = safe_int(k_leader, 'k')
+        if k_val > 0:
+            note = check_record("most_k_pitcher", pname(k_leader['player_id']), k_val, "🔥", "strikeouts (pitcher)")
+            if note:
+                callouts.append(note)
+
+    # Check ERA low (min 30 IP)
+    qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 30]
+    if qualified_sp:
+        era_leader = min(qualified_sp, key=lambda r: safe_float(r, 'era') if safe_float(r, 'era') > 0 else 99)
+        era_val = round(safe_float(era_leader, 'era'), 2)
+        if era_val > 0:
+            note = check_record("best_era", pname(era_leader['player_id']), era_val, "🎯", "ERA (lowest)", higher_is_better=False)
+            if note:
+                callouts.append(note)
+
+    state["season_records"] = season_records
+    return callouts[:2]  # Cap to 2 to keep the section tight
+
+
+def get_milestone_countdowns(league_url):
+    """
+    Scans player career stats to find players approaching major milestones.
+    Returns a list of countdown strings, capped at 3.
+    """
+    import csv
+    import io
+
+    bat_api = f"{league_url}/api/playerbatstatsv2/"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
+    players_api = f"{league_url}/api/players/"
+
+    HIT_MILESTONES = [500, 1000, 1500, 2000, 2500, 3000]
+    HR_MILESTONES = [100, 200, 300, 400, 500]
+    WIN_MILESTONES = [100, 150, 200, 250, 300]
+    K_MILESTONES = [500, 1000, 1500, 2000, 2500, 3000]
+    SAVE_MILESTONES = [50, 100, 200, 300]
+    LOOKAHEAD = 30  # only surface if within this many of the milestone
+
+    def fetch_csv(url):
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            text = "\n".join(line for line in resp.text.splitlines() if line.strip())
+            return list(csv.DictReader(io.StringIO(text)))
+        except Exception as e:
+            print(f"API fetch failed for {url}: {e}")
+            return []
+
+    def safe_int(d, key, default=0):
+        try: return int(d.get(key, default) or default)
+        except: return default
+
+    player_rows = fetch_csv(players_api)
+    player_names = {}
+    for r in player_rows:
+        pid = r.get('ID', '').strip()
+        first = r.get('First Name', '').strip()
+        last = r.get('Last Name', '').strip()
+        if pid:
+            player_names[pid] = f"{first} {last}".strip()
+
+    def pname(pid):
+        return player_names.get(str(pid), f"Player#{pid}")
+
+    countdowns = []
+
+    # Use career split (split_id == '0') if available, fall back to overall
+    bat_rows = fetch_csv(bat_api)
+    career_bat = [r for r in bat_rows if r.get('split_id') == '0']
+    if not career_bat:
+        career_bat = [r for r in bat_rows if r.get('split_id') == '1']
+
+    pitch_rows = fetch_csv(pitch_api)
+    career_pitch = [r for r in pitch_rows if r.get('split_id') == '0']
+    if not career_pitch:
+        career_pitch = [r for r in pitch_rows if r.get('split_id') == '1']
+
+    # Hits
+    for r in career_bat:
+        hits = safe_int(r, 'h')
+        for milestone in HIT_MILESTONES:
+            remaining = milestone - hits
+            if 0 < remaining <= LOOKAHEAD:
+                name = pname(r['player_id'])
+                countdowns.append((remaining, f"🎯 *Milestone Watch:* {name} needs just *{remaining} more hits* to reach *{milestone:,} career hits*."))
+                break
+
+    # Home Runs
+    for r in career_bat:
+        hrs = safe_int(r, 'hr')
+        for milestone in HR_MILESTONES:
+            remaining = milestone - hrs
+            if 0 < remaining <= LOOKAHEAD:
+                name = pname(r['player_id'])
+                countdowns.append((remaining, f"💣 *Milestone Watch:* {name} is *{remaining} home runs away* from *{milestone} career HR*."))
+                break
+
+    # Wins
+    for r in career_pitch:
+        wins = safe_int(r, 'w')
+        for milestone in WIN_MILESTONES:
+            remaining = milestone - wins
+            if 0 < remaining <= LOOKAHEAD:
+                name = pname(r['player_id'])
+                countdowns.append((remaining, f"🏆 *Milestone Watch:* {name} needs *{remaining} more wins* to reach *{milestone} career wins*."))
+                break
+
+    # Strikeouts (pitchers)
+    for r in career_pitch:
+        ks = safe_int(r, 'k')
+        for milestone in K_MILESTONES:
+            remaining = milestone - ks
+            if 0 < remaining <= LOOKAHEAD:
+                name = pname(r['player_id'])
+                countdowns.append((remaining, f"🔥 *Milestone Watch:* {name} is *{remaining} strikeouts away* from *{milestone:,} career Ks*."))
+                break
+
+    # Saves
+    for r in career_pitch:
+        saves = safe_int(r, 's')
+        for milestone in SAVE_MILESTONES:
+            remaining = milestone - saves
+            if 0 < remaining <= LOOKAHEAD:
+                name = pname(r['player_id'])
+                countdowns.append((remaining, f"🔒 *Milestone Watch:* {name} needs *{remaining} more saves* to reach *{milestone} career saves*."))
+                break
+
+    # Sort by how close they are and cap at 3
+    countdowns.sort(key=lambda x: x[0])
+    return [text for _, text in countdowns[:3]]
+
+
+def get_trivia_question(league_url, state):
+    """
+    Generates a blind stat trivia question from a notable player.
+    Stores the answer in state for the next sim to reveal.
+    Returns a dict with:
+      - 'last_answer': the previous sim's answer (player name + hint), or None
+      - 'question': the new blind stat question text
+    """
+    import csv
+    import io
+    import random
+
+    bat_api = f"{league_url}/api/playerbatstatsv2/"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
+    players_api = f"{league_url}/api/players/"
+
+    def fetch_csv(url):
+        try:
+            resp = requests.get(url, timeout=15)
+            resp.raise_for_status()
+            text = "\n".join(line for line in resp.text.splitlines() if line.strip())
+            return list(csv.DictReader(io.StringIO(text)))
+        except Exception as e:
+            print(f"API fetch failed for {url}: {e}")
+            return []
+
+    def safe_int(d, key, default=0):
+        try: return int(d.get(key, default) or default)
+        except: return default
+
+    def safe_float(d, key, default=0.0):
+        try: return float(d.get(key, default) or default)
+        except: return default
+
+    player_rows = fetch_csv(players_api)
+    player_names = {}
+    for r in player_rows:
+        pid = r.get('ID', '').strip()
+        first = r.get('First Name', '').strip()
+        last = r.get('Last Name', '').strip()
+        if pid:
+            player_names[pid] = f"{first} {last}".strip()
+
+    def pname(pid):
+        return player_names.get(str(pid), f"Player#{pid}")
+
+    # Retrieve last sim's answer to reveal
+    last_answer = state.get("trivia_answer")
+
+    bat_rows = fetch_csv(bat_api)
+    bat_overall = [r for r in bat_rows if r.get('split_id') == '1']
+    pitch_rows = fetch_csv(pitch_api)
+    pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
+
+    qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= 150]
+    qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 30 and safe_int(r, 'gs') >= 5]
+
+    candidates = []
+
+    # Batter trivia candidates: top WAR, best AVG, worst AVG, most HR
+    if qualified_bat:
+        war_king = max(qualified_bat, key=lambda r: safe_float(r, 'war'))
+        avg = safe_float(war_king, 'avg')
+        hr = safe_int(war_king, 'hr')
+        rbi = safe_int(war_king, 'rbi')
+        war = safe_float(war_king, 'war')
+        pa = safe_int(war_king, 'pa')
+        q = f"This batter leads all position players with *{war:.1f} WAR*. They're hitting *.{int(avg*1000):03d}* with *{hr} HR* and *{rbi} RBI* in *{pa} PA*. Who is it? 🤔"
+        candidates.append({"question": q, "answer": pname(war_king['player_id']), "type": "batter_war"})
+
+        hr_king = max(qualified_bat, key=lambda r: safe_int(r, 'hr'))
+        hrs = safe_int(hr_king, 'hr')
+        avg2 = safe_float(hr_king, 'avg')
+        rbi2 = safe_int(hr_king, 'rbi')
+        obp = safe_float(hr_king, 'obp')
+        q = f"This slugger leads the league with *{hrs} home runs*. They're batting *.{int(avg2*1000):03d}* with a *.{int(obp*1000):03d} OBP* and *{rbi2} RBI*. Who is it? 🤔"
+        candidates.append({"question": q, "answer": pname(hr_king['player_id']), "type": "batter_hr"})
+
+    # Pitcher trivia candidates: best ERA, most K, most wins
+    if qualified_sp:
+        era_leader = min(qualified_sp, key=lambda r: safe_float(r, 'era') if safe_float(r, 'era') > 0 else 99)
+        era = safe_float(era_leader, 'era')
+        ks = safe_int(era_leader, 'k')
+        wins = safe_int(era_leader, 'w')
+        ip = safe_float(era_leader, 'ip')
+        q = f"This starter has a *{era:.2f} ERA* and *{ks} strikeouts* over *{ip:.0f} innings* with *{wins} wins*. Who is it? 🤔"
+        candidates.append({"question": q, "answer": pname(era_leader['player_id']), "type": "pitcher_era"})
+
+        k_king = max(qualified_sp, key=lambda r: safe_int(r, 'k'))
+        k_val = safe_int(k_king, 'k')
+        era2 = safe_float(k_king, 'era')
+        wins2 = safe_int(k_king, 'w')
+        ip2 = safe_float(k_king, 'ip')
+        q = f"This strikeout artist leads all starters with *{k_val} Ks* in *{ip2:.0f} IP*. Their ERA is *{era2:.2f}* and they have *{wins2} wins*. Who is it? 🤔"
+        candidates.append({"question": q, "answer": pname(k_king['player_id']), "type": "pitcher_k"})
+
+    if not candidates:
+        return None
+
+    # Avoid repeating the same player as last time
+    last_type = state.get("trivia_answer", {}).get("type")
+    fresh = [c for c in candidates if c["type"] != last_type]
+    chosen = random.choice(fresh if fresh else candidates)
+
+    state["trivia_answer"] = {
+        "player_name": chosen["answer"],
+        "question_text": chosen["question"],
+        "type": chosen["type"]
+    }
+
+    return {
+        "last_answer": last_answer,
+        "question": chosen["question"]
+    }
 
 
 if __name__ == "__main__":

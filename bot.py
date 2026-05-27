@@ -8,7 +8,12 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 import time
 import sys
-from scraper import get_best_performances, get_headlines_and_milestones, get_team_momentum, get_team_luck, get_close_division_races, get_notable_games, get_api_oddities
+from scraper import (
+    get_best_performances, get_headlines_and_milestones,
+    get_team_momentum, get_team_luck, get_close_division_races,
+    get_notable_games, get_api_oddities, get_sim_analytics,
+    get_streaks_and_records, get_milestone_countdowns, get_trivia_question
+)
 
 # Load environment variables
 load_dotenv()
@@ -147,37 +152,157 @@ def build_headlines_blocks(headlines):
     
     return blocks
 
-def build_analytics_blocks(hottest, coldest, luckiest, unluckiest):
-    if not hottest or not luckiest:
+def build_analytics_blocks(analytics_data, streak_callouts=None, milestones=None):
+    """
+    Builds the Sim Analytics & Trends section.
+    Accepts the dict from get_sim_analytics() and renders the correct mode.
+    Optionally appends streak callouts and milestone countdowns.
+    """
+    if not analytics_data:
         return []
-        
-    blocks = [
-        {
+
+    mode = analytics_data.get("mode", "standard")
+    blocks = []
+
+    if mode == "standard":
+        hottest = analytics_data.get("hottest")
+        coldest = analytics_data.get("coldest")
+        luckiest = analytics_data.get("luckiest")
+        unluckiest = analytics_data.get("unluckiest")
+        if not hottest or not luckiest:
+            return []
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends*"}
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🔥 *Who's Hot*: The *{hottest['team']}* surged this sim, gaining *+{hottest['change']}* ELO points.\n🧊 *Who's Not*: The *{coldest['team']}* collapsed, dropping *{coldest['change']}* ELO points."
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🍀 *Luckiest Team*: The *{luckiest['team']}* have *+{luckiest['luck']}* more wins than their BaseRuns predict ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Unluckiest Team*: The *{unluckiest['team']}* have *{unluckiest['luck']}* fewer wins than their BaseRuns predict ({unluckiest['actual']} actual vs {unluckiest['expected']} expected)."
+                }
+            },
+        ]
+
+    elif mode == "rankings_shakeup":
+        gainer = analytics_data.get("biggest_gainer")
+        loser = analytics_data.get("biggest_loser")
+        luckiest = analytics_data.get("luckiest")
+        unluckiest = analytics_data.get("unluckiest")
+        if not gainer or not luckiest:
+            return []
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Rankings Shakeup Edition*"}
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"📈 *Biggest Climber*: The *{gainer['team']}* made the biggest jump this sim, gaining *+{gainer['change']}* ELO points.\n📉 *Biggest Faller*: The *{loser['team']}* took the hardest hit, dropping *{loser['change']}* ELO points."
+                }
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🍀 *Running Lucky*: The *{luckiest['team']}* still have *+{luckiest['luck']}* more wins than BaseRuns predicts ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Still Getting Robbed*: The *{unluckiest['team']}* remain *{unluckiest['luck']}* wins below their BaseRuns expectation."
+                }
+            },
+        ]
+
+    elif mode == "luck_focus":
+        hottest = analytics_data.get("hottest")
+        coldest = analytics_data.get("coldest")
+        luckiest = analytics_data.get("luckiest")
+        unluckiest = analytics_data.get("unluckiest")
+        if not luckiest:
+            return []
+        blocks = [
+            {
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Luck Report*"}
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": (
+                        f"⚖️ *BaseRuns Luck Standings* — who's been blessed and who's been robbed:\n"
+                        f"🍀 *{luckiest['team']}*: *+{luckiest['luck']}* wins above expectation ({luckiest['actual']} actual vs {luckiest['expected']} expected) — riding some serious fortune.\n"
+                        f"🌩️ *{unluckiest['team']}*: *{unluckiest['luck']}* wins below expectation ({unluckiest['actual']} actual vs {unluckiest['expected']} expected) — the simulation engine has been brutal."
+                    )
+                }
+            },
+        ]
+        if hottest and coldest:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"🔥 *Momentum Check*: {hottest['team']} (+{hottest['change']} ELO) trending up, {coldest['team']} ({coldest['change']} ELO) trending down."
+                }
+            })
+
+    # Append streak callouts
+    if streak_callouts:
+        for callout in streak_callouts:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": callout}
+            })
+
+    # Append milestone countdowns
+    if milestones:
+        milestones_text = "\n".join(milestones)
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": milestones_text}
+        })
+
+    blocks.append({"type": "divider"})
+    return blocks
+
+
+def build_trivia_blocks(trivia):
+    """
+    Builds the trivia section. Reveals the previous sim's answer if available,
+    then posts the new blind stat challenge.
+    """
+    if not trivia:
+        return []
+
+    blocks = []
+    last_answer = trivia.get("last_answer")
+
+    if last_answer:
+        player_name = last_answer.get("player_name", "Unknown")
+        prev_question = last_answer.get("question_text", "")
+        blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "📊 *Sim Analytics & Trends*"
+                "text": f"❓ *Last Sim's Trivia Answer:* The answer was *{player_name}*!\n_{prev_question}_"
             }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"🔥 *Who's Hot*: The *{hottest['team']}* surged this sim, gaining *+{hottest['change']}* ELO points.\n🧊 *Who's Not*: The *{coldest['team']}* collapsed, dropping *{coldest['change']}* ELO points."
-            }
-        },
-        {
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"🍀 *Luckiest Team*: The *{luckiest['team']}* have *+{luckiest['luck']}* more wins than their BaseRuns predict ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Unluckiest Team*: The *{unluckiest['team']}* have *{unluckiest['luck']}* fewer wins than their BaseRuns predict ({unluckiest['actual']} actual vs {unluckiest['expected']} expected)."
-            }
-        },
-        {
-            "type": "divider"
+        })
+
+    blocks.append({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": f"🧩 *Guess the Player!*\n{trivia['question']}\n_Reply in thread with your guess — answer revealed next sim!_"
         }
-    ]
-    
+    })
+    blocks.append({"type": "divider"})
     return blocks
 
 def build_notable_games_blocks(notable_games):
@@ -284,23 +409,50 @@ def post_daily_digest(blocks):
         print(f"Error posting daily digest to Slack: {e.response['error']}")
 
 def trigger_daily_digest():
+    import json
+    import os
+
+    # Load persistent state (used by oddity rotation, analytics mode, streaks, trivia)
+    state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+    try:
+        with open(state_path, "r") as f:
+            state = json.load(f)
+    except Exception:
+        state = {}
+
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
-    
+
     print(f"Fetching headlines from StatsPlus recap...")
     headlines = get_headlines_and_milestones(LEAGUE_URL)
-    
-    print(f"Fetching team analytics...")
-    hottest, coldest = get_team_momentum(LEAGUE_URL)
-    luckiest, unluckiest = get_team_luck(LEAGUE_URL)
-    
+
+    print(f"Fetching rotating sim analytics...")
+    analytics_data = get_sim_analytics(LEAGUE_URL)
+
+    print(f"Fetching streaks and season records...")
+    streak_callouts = get_streaks_and_records(LEAGUE_URL, state)
+
+    print(f"Fetching milestone countdowns...")
+    milestones = get_milestone_countdowns(LEAGUE_URL)
+
     print(f"Fetching API oddities...")
     api_oddities = get_api_oddities(LEAGUE_URL)
 
     print(f"Fetching notable/weird games...")
     notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
+
     print(f"Fetching close division races...")
     races = get_close_division_races(LEAGUE_URL)
+
+    print(f"Generating trivia question...")
+    trivia = get_trivia_question(LEAGUE_URL, state)
+
+    # Save updated state (all functions above may have mutated state)
+    try:
+        with open(state_path, "w") as f:
+            json.dump(state, f, indent=2)
+    except Exception as e:
+        print(f"Warning: Could not save state: {e}")
 
     # Build summary text
     summary_parts = []
@@ -308,7 +460,7 @@ def trigger_daily_digest():
         summary_parts.append("Play of the Week")
     if headlines:
         summary_parts.append(f"{len(headlines)} Headlines")
-    if hottest:
+    if analytics_data:
         summary_parts.append("Team Analytics")
     if races:
         summary_parts.append(f"{len(races)} Pennant Races")
@@ -316,28 +468,32 @@ def trigger_daily_digest():
         summary_parts.append(f"{len(notable_games)} Weird Moments")
     if api_oddities:
         summary_parts.append(f"{len(api_oddities)} League Stats")
-        
+    if trivia:
+        summary_parts.append("Trivia")
+
     summary_text = "Includes: " + ", ".join(summary_parts) if summary_parts else "No notable updates this sim."
 
     print("Building Daily Digest blocks...")
     all_blocks = []
     all_blocks.extend(build_sim_header_blocks(summary_text))
-    
+
     if best_pitcher:
         all_blocks.extend(build_performance_blocks(best_pitcher, "Pitcher of the Sim"))
     if best_batter:
         all_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
     if headlines:
         all_blocks.extend(build_headlines_blocks(headlines))
-    if hottest and luckiest:
-        all_blocks.extend(build_analytics_blocks(hottest, coldest, luckiest, unluckiest))
+    if analytics_data:
+        all_blocks.extend(build_analytics_blocks(analytics_data, streak_callouts, milestones))
     if api_oddities:
         all_blocks.extend(build_api_oddities_blocks(api_oddities))
     if notable_games:
         all_blocks.extend(build_notable_games_blocks(notable_games))
     if races:
         all_blocks.extend(build_division_races_blocks(races))
-        
+    if trivia:
+        all_blocks.extend(build_trivia_blocks(trivia))
+
     # Remove the very last divider if it exists
     if all_blocks and all_blocks[-1].get("type") == "divider":
         all_blocks.pop()
