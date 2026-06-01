@@ -886,6 +886,48 @@ def get_sim_analytics(league_url="https://statsplus.net/xfbl"):
             "unluckiest": unluckiest,
         }
 
+PLAYOFF_KEYWORDS = [
+    "wild card", "wildcard", "division series", "alds", "nlds",
+    "championship series", "alcs", "nlcs", "world series",
+    "league championship", "league division",
+    "playoff", "postseason", "october baseball",
+]
+
+def get_season_phase(league_url, best_pitcher, best_batter):
+    """
+    Determines the current season phase: 'regular', 'postseason', or 'offseason'.
+
+    Logic:
+      1. If both best_pitcher and best_batter are None → no games were played
+         this sim → 'offseason'.
+      2. Otherwise, scrape the recap page and search for known playoff round
+         keywords in the page text. If found → 'postseason'.
+      3. Otherwise → 'regular'.
+
+    Returns one of: 'regular', 'postseason', 'offseason'
+    """
+    # Step 1: no game data → offseason
+    if not best_pitcher and not best_batter:
+        print("No game performances found — treating as offseason sim.")
+        return "offseason"
+
+    # Step 2: check recap page for playoff keywords (body content only, not nav)
+    recap_url = f"{league_url.rstrip('/')}/recap/"
+    try:
+        resp = requests.get(recap_url, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+        # Remove nav and footer to avoid false positives from "Playoff Odds" nav links
+        for tag in soup.find_all(['nav', 'footer']):
+            tag.decompose()
+        body_text = soup.get_text(separator=' ').lower()
+        for keyword in PLAYOFF_KEYWORDS:
+            if keyword in body_text:
+                print(f"Playoff keyword detected in recap body: '{keyword}' → postseason.")
+                return "postseason"
+    except Exception as e:
+        print(f"Could not fetch recap page for phase detection: {e}")
+
+    return "regular"
 
 
 def get_streaks_and_records(league_url, state):

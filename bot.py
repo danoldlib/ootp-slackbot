@@ -12,7 +12,8 @@ from scraper import (
     get_best_performances, get_headlines_and_milestones,
     get_team_momentum, get_team_luck, get_close_division_races,
     get_notable_games, get_api_oddities, get_sim_analytics,
-    get_streaks_and_records, get_milestone_countdowns, get_trivia_question
+    get_streaks_and_records, get_milestone_countdowns, get_trivia_question,
+    get_season_phase
 )
 
 # Load environment variables
@@ -408,6 +409,85 @@ def post_daily_digest(blocks):
     except SlackApiError as e:
         print(f"Error posting daily digest to Slack: {e.response['error']}")
 
+def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games):
+    """
+    Builds a postseason-specific digest. Focuses on performances and drama,
+    strips out regular-season analytics, oddities, and standings races.
+    """
+    blocks = [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "🏆 XFBL Postseason: October Baseball!",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "_The regular season is over. Every game now is win-or-go-home. Let's see who's stepping up._"
+            }
+        },
+        {"type": "divider"}
+    ]
+
+    if best_pitcher:
+        blocks.extend(build_performance_blocks(best_pitcher, "Playoff Pitcher of the Sim"))
+    if best_batter:
+        blocks.extend(build_performance_blocks(best_batter, "Playoff Batter of the Sim"))
+    if headlines:
+        # Re-label headlines section for playoffs
+        headlines_text = "\n".join([f"• {h}" for h in headlines])
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"📋 *Playoff Highlights*\n{headlines_text}"
+            }
+        })
+        blocks.append({"type": "divider"})
+    if notable_games:
+        blocks.extend(build_notable_games_blocks(notable_games))
+
+    if blocks and blocks[-1].get("type") == "divider":
+        blocks.pop()
+    return blocks
+
+
+def build_offseason_blocks():
+    """
+    Posts a short offseason sim acknowledgment.
+    Skips all stats-based sections since no games were played.
+    """
+    import random
+    flavor_lines = [
+        "The hot stove is heating up. GMs are wheeling and dealing.",
+        "No games today — just front office moves, contract talks, and roster shuffling.",
+        "Players are working out, agents are calling, and rosters are taking shape.",
+        "It's quiet on the diamond, but busy in the front office.",
+        "The offseason grind continues. Every move matters for next year.",
+    ]
+    return [
+        {
+            "type": "header",
+            "text": {
+                "type": "plain_text",
+                "text": "💤 XFBL Offseason Sim Complete",
+                "emoji": True
+            }
+        },
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": f"_{random.choice(flavor_lines)}_\n\nNo game stats to report this sim. Check the site for transactions, signings, and roster moves."
+            }
+        }
+    ]
+
+
 def trigger_daily_digest():
     import json
     import os
@@ -423,6 +503,33 @@ def trigger_daily_digest():
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
 
+    print(f"Detecting season phase...")
+    season_phase = get_season_phase(LEAGUE_URL, best_pitcher, best_batter)
+    print(f"Season phase: {season_phase}")
+
+    # ── OFFSEASON ─────────────────────────────────────────────────────────────
+    if season_phase == "offseason":
+        print("Offseason sim detected — posting short update, skipping rotation state.")
+        all_blocks = build_offseason_blocks()
+        post_daily_digest(all_blocks)
+        return
+
+    # ── POSTSEASON ────────────────────────────────────────────────────────────
+    if season_phase == "postseason":
+        print("Postseason sim detected — posting playoff digest.")
+        headlines = get_headlines_and_milestones(LEAGUE_URL)
+        notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
+        all_blocks = build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
+        # Save state but skip burning rotation state (oddities/trivia/analytics)
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save state: {e}")
+        post_daily_digest(all_blocks)
+        return
+
+    # ── REGULAR SEASON ────────────────────────────────────────────────────────
     print(f"Fetching headlines from StatsPlus recap...")
     headlines = get_headlines_and_milestones(LEAGUE_URL)
 
