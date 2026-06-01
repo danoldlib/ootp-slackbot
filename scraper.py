@@ -686,12 +686,17 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🧊", "winner_id": kb_king['player_id']
             }
 
-        era_losers = [r for r in qualified_sp if safe_float(r, 'era') > 0]
+        def calc_era(r):
+            ip = safe_float(r, 'ip')
+            er = safe_float(r, 'er')
+            return round((er / ip) * 9, 2) if ip > 0 else 0.0
+
+        era_losers = [r for r in qualified_sp if calc_era(r) > 0]
         if era_losers:
-            gas_can = max(era_losers, key=lambda r: safe_float(r, 'era'))
+            gas_can = max(era_losers, key=calc_era)
             name, team = pname(gas_can['player_id'], gas_can['team_id'])
             all_oddities["gas_can"] = {
-                "text": f"🛢️ *Gas Can:* {name} ({team}) is sporting a *{safe_float(gas_can, 'era'):.2f} ERA* — every run scores when this one takes the mound.",
+                "text": f"🛢️ *Gas Can:* {name} ({team}) is sporting a *{calc_era(gas_can):.2f} ERA* — every run scores when this one takes the mound.",
                 "emoji": "🛢️", "winner_id": gas_can['player_id']
             }
 
@@ -1065,10 +1070,15 @@ def get_streaks_and_records(league_url, state):
                 callouts.append(note)
 
     # Check ERA low (min 30 IP)
+    def calc_era(r):
+        ip = safe_float(r, 'ip')
+        er = safe_float(r, 'er')
+        return round((er / ip) * 9, 2) if ip > 0 else 0.0
+
     qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 30]
     if qualified_sp:
-        era_leader = min(qualified_sp, key=lambda r: safe_float(r, 'era') if safe_float(r, 'era') > 0 else 99)
-        era_val = round(safe_float(era_leader, 'era'), 2)
+        era_leader = min(qualified_sp, key=lambda r: calc_era(r) if calc_era(r) > 0 else 99)
+        era_val = calc_era(era_leader)
         if era_val > 0:
             note = check_record("best_era", pname(era_leader['player_id']), era_val, "🎯", "ERA (lowest)", higher_is_better=False)
             if note:
@@ -1269,10 +1279,15 @@ def get_trivia_question(league_url, state):
         q = f"This slugger leads the league with *{hrs} home runs*. They're batting *.{int(avg2*1000):03d}* with a *.{int(obp*1000):03d} OBP* and *{rbi2} RBI*. Who is it? 🤔"
         candidates.append({"question": q, "answer": pname(hr_king['player_id']), "type": "batter_hr"})
 
+    def calc_era(r):
+        ip = safe_float(r, 'ip')
+        er = safe_float(r, 'er')
+        return round((er / ip) * 9, 2) if ip > 0 else 0.0
+
     # Pitcher trivia candidates: best ERA, most K, most wins
     if qualified_sp:
-        era_leader = min(qualified_sp, key=lambda r: safe_float(r, 'era') if safe_float(r, 'era') > 0 else 99)
-        era = safe_float(era_leader, 'era')
+        era_leader = min(qualified_sp, key=lambda r: calc_era(r) if calc_era(r) > 0 else 99)
+        era = calc_era(era_leader)
         ks = safe_int(era_leader, 'k')
         wins = safe_int(era_leader, 'w')
         ip = safe_float(era_leader, 'ip')
@@ -1281,7 +1296,7 @@ def get_trivia_question(league_url, state):
 
         k_king = max(qualified_sp, key=lambda r: safe_int(r, 'k'))
         k_val = safe_int(k_king, 'k')
-        era2 = safe_float(k_king, 'era')
+        era2 = calc_era(k_king)
         wins2 = safe_int(k_king, 'w')
         ip2 = safe_float(k_king, 'ip')
         q = f"This strikeout artist leads all starters with *{k_val} Ks* in *{ip2:.0f} IP*. Their ERA is *{era2:.2f}* and they have *{wins2} wins*. Who is it? 🤔"
