@@ -13,7 +13,7 @@ from scraper import (
     get_team_momentum, get_team_luck, get_close_division_races,
     get_notable_games, get_api_oddities, get_sim_analytics,
     get_streaks_and_records, get_milestone_countdowns, get_trivia_question,
-    get_season_phase
+    get_season_phase, get_power_rankings, get_offseason_transactions
 )
 
 # Load environment variables
@@ -409,6 +409,48 @@ def post_daily_digest(blocks):
     except SlackApiError as e:
         print(f"Error posting daily digest to Slack: {e.response['error']}")
 
+def build_power_rankings_blocks(rankings):
+    """
+    Builds a Slack block for the OOTP weekly power rankings.
+    Shows the top 5 and bottom 5, highlighting big movers (++ or --).
+    """
+    if not rankings:
+        return []
+
+    trend_emoji = {"++": "🔥", "+": "📈", "o": "➡️", "-": "📉", "--": "❄️"}
+
+    # Top 5 risers/fallers first
+    big_movers = [r for r in rankings if r["trend"] in ("++", "--")]
+    top5 = rankings[:5]
+    bottom5 = rankings[-5:]
+
+    def fmt(r):
+        emoji = trend_emoji.get(r["trend"], "")
+        return f"{emoji} *{r['rank']}.* {r['team']} ({r['points']:.1f} pts)"
+
+    lines = ["*📊 Weekly Power Rankings*", ""]
+    lines.append("_Top of the league:_")
+    lines += [fmt(r) for r in top5]
+    lines.append("")
+    lines.append("_Struggling:_")
+    lines += [fmt(r) for r in bottom5]
+
+    if big_movers:
+        lines.append("")
+        lines.append("_Big movers this sim:_")
+        for r in big_movers:
+            direction = "🔥 rising" if r["trend"] == "++" else "❄️ falling"
+            lines.append(f"• *{r['team']}* is {direction} (#{r['rank']})`")
+
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+        },
+        {"type": "divider"}
+    ]
+
+
 def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games):
     """
     Builds a postseason-specific digest. Focuses on performances and drama,
@@ -456,10 +498,10 @@ def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
     return blocks
 
 
-def build_offseason_blocks():
+def build_offseason_blocks(transactions=None):
     """
-    Posts a short offseason sim acknowledgment.
-    Skips all stats-based sections since no games were played.
+    Posts an offseason sim update. If transactions are available, lists the
+    real roster moves that happened. Falls back to flavor text if empty.
     """
     import random
     flavor_lines = [
@@ -469,7 +511,7 @@ def build_offseason_blocks():
         "It's quiet on the diamond, but busy in the front office.",
         "The offseason grind continues. Every move matters for next year.",
     ]
-    return [
+    blocks = [
         {
             "type": "header",
             "text": {
@@ -482,10 +524,39 @@ def build_offseason_blocks():
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"_{random.choice(flavor_lines)}_\n\nNo game stats to report this sim. Check the site for transactions, signings, and roster moves."
+                "text": f"_{random.choice(flavor_lines)}_"
             }
         }
     ]
+
+    if transactions:
+        # Group by date
+        from collections import defaultdict
+        by_date = defaultdict(list)
+        for t in transactions:
+            by_date[t["date"]].append(t)
+
+        tx_lines = ["*📋 Recent Roster Moves*", ""]
+        for date, moves in list(by_date.items())[:3]:  # cap at 3 date groups
+            tx_lines.append(f"__{date}__")
+            for m in moves[:8]:  # cap moves per day
+                tx_lines.append(f"• *{m['team']}*: {m['action']}")
+            tx_lines.append("")
+
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(tx_lines).strip()}
+        })
+    else:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "No transactions logged this sim. Check the site for the latest moves."
+            }
+        })
+
+    return blocks
 
 
 def trigger_daily_digest():
@@ -510,7 +581,9 @@ def trigger_daily_digest():
     # ── OFFSEASON ─────────────────────────────────────────────────────────────
     if season_phase == "offseason":
         print("Offseason sim detected — posting short update, skipping rotation state.")
-        all_blocks = build_offseason_blocks()
+        print("Fetching offseason transactions...")
+        transactions = get_offseason_transactions(LEAGUE_URL)
+        all_blocks = build_offseason_blocks(transactions)
         post_daily_digest(all_blocks)
         return
 
@@ -530,6 +603,9 @@ def trigger_daily_digest():
         return
 
     # ── REGULAR SEASON ────────────────────────────────────────────────────────
+    print(f"Fetching power rankings...")
+    power_rankings = get_power_rankings(LEAGUE_URL)
+
     print(f"Fetching headlines from StatsPlus recap...")
     headlines = get_headlines_and_milestones(LEAGUE_URL)
 
@@ -575,6 +651,8 @@ def trigger_daily_digest():
         summary_parts.append(f"{len(notable_games)} Weird Moments")
     if api_oddities:
         summary_parts.append(f"{len(api_oddities)} League Stats")
+    if power_rankings:
+        summary_parts.append("Power Rankings")
     if trivia:
         summary_parts.append("Trivia")
 
@@ -598,6 +676,8 @@ def trigger_daily_digest():
         all_blocks.extend(build_notable_games_blocks(notable_games))
     if races:
         all_blocks.extend(build_division_races_blocks(races))
+    if power_rankings:
+        all_blocks.extend(build_power_rankings_blocks(power_rankings))
     if trivia:
         all_blocks.extend(build_trivia_blocks(trivia))
 

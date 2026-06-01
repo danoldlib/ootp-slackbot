@@ -932,6 +932,20 @@ def get_season_phase(league_url, best_pitcher, best_batter):
     except Exception as e:
         print(f"Could not fetch recap page for phase detection: {e}")
 
+    # Step 3: check OOTP scores report page title (e.g. "ALCS Game 3" vs "Scoreboard: August 13")
+    scores_report_url = f"{REPORTS_BASE}/league_100_scores.html"
+    try:
+        resp = requests.get(scores_report_url, timeout=15)
+        title = BeautifulSoup(resp.text, 'html.parser').find('title')
+        if title:
+            title_lower = title.get_text().lower()
+            for keyword in PLAYOFF_KEYWORDS:
+                if keyword in title_lower:
+                    print(f"Playoff keyword in scores report title: '{keyword}' → postseason.")
+                    return "postseason"
+    except Exception as e:
+        print(f"Could not fetch scores report for phase detection: {e}")
+
     return "regular"
 
 
@@ -1322,7 +1336,95 @@ def get_trivia_question(league_url, state):
     }
 
 
+REPORTS_BASE = "https://statsplus.net/xfbl/reports/news/html/leagues"
+
+def get_power_rankings(league_url="https://statsplus.net/xfbl"):
+    """
+    Scrapes the OOTP weekly power rankings from the league home report.
+    Returns a list of dicts: {rank, team, points, trend}
+    trend is one of: '++', '+', 'o', '-', '--'
+
+    The home page contains a block like:
+      1) Atlanta Braves (132.4, +)
+      2) Tampa Bay Devil Rays (126.5, -)
+    """
+    report_url = f"{REPORTS_BASE}/league_100_home.html"
+    try:
+        resp = requests.get(report_url, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        print(f"Could not fetch power rankings: {e}")
+        return []
+
+    # The rankings are inside a <td> as plain text lines like "1) Team Name (pts, trend)"
+    rankings = []
+    pattern = re.compile(r'^(\d+)\)\s+(.+?)\s+\((\d+\.?\d*),\s*([+\-o]+)\)$')
+
+    for td in soup.find_all('td'):
+        text = td.get_text(separator='\n')
+        for line in text.split('\n'):
+            line = line.strip()
+            m = pattern.match(line)
+            if m:
+                rankings.append({
+                    "rank": int(m.group(1)),
+                    "team": m.group(2).strip(),
+                    "points": float(m.group(3)),
+                    "trend": m.group(4).strip()
+                })
+
+    if rankings:
+        print(f"Power rankings: found {len(rankings)} teams.")
+    return rankings
+
+
+def get_offseason_transactions(league_url="https://statsplus.net/xfbl", max_days=7):
+    """
+    Scrapes the OOTP transactions report for roster moves since the last sim.
+    Returns a list of dicts: {date, team, action}
+    Limits to the most recent max_days worth of dated sections.
+    """
+    report_url = f"{REPORTS_BASE}/league_100_transactions_0_0.html"
+    try:
+        resp = requests.get(report_url, timeout=15)
+        soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        print(f"Could not fetch transactions: {e}")
+        return []
+
+    transactions = []
+    current_date = None
+    days_seen = 0
+
+    for table in soup.find_all('table', class_='data'):
+        # Each <table class="data"> starts with a <th class="dl"> date header
+        header = table.find('th', class_='dl')
+        if header:
+            current_date = header.get_text(strip=True)
+            days_seen += 1
+            if days_seen > max_days:
+                break
+
+        for td in table.find_all('td', class_=lambda c: c and 'dl' in c):
+            text = td.get_text(separator=' ', strip=True)
+            # Strip team name from linked text at start
+            team_tag = td.find('a')
+            team = team_tag.get_text(strip=True) if team_tag else "Unknown"
+            # Remove leading "TeamName: " prefix
+            action = re.sub(r'^[^:]+:\s*', '', text).strip()
+            if action and current_date:
+                transactions.append({
+                    "date": current_date,
+                    "team": team,
+                    "action": action
+                })
+
+    print(f"Offseason transactions: found {len(transactions)} moves.")
+    return transactions
+
+
 if __name__ == "__main__":
+
 
     best_pitcher, best_batter = get_best_performances()
     print("Best Pitcher:", best_pitcher)
