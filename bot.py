@@ -13,7 +13,8 @@ from scraper import (
     get_team_momentum, get_team_luck, get_close_division_races,
     get_notable_games, get_api_oddities, get_sim_analytics,
     get_streaks_and_records, get_milestone_countdowns, get_trivia_question,
-    get_season_phase, get_power_rankings, get_offseason_transactions
+    get_season_phase, get_power_rankings, get_offseason_transactions,
+    get_playoff_odds
 )
 
 # Load environment variables
@@ -392,6 +393,82 @@ def build_division_races_blocks(races):
         
     return blocks
 
+def build_playoff_odds_blocks(odds_data):
+    if not odds_data:
+        return []
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🔮 *Postseason Projections & Playoff Odds*"
+            }
+        }
+    ]
+
+    al_lines = []
+    nl_lines = []
+
+    # 1. American League (AL)
+    al_data = odds_data.get("AL", {})
+    al_bubble = al_data.get("bubble", [])
+    al_contenders = al_data.get("contenders", [])
+
+    if al_bubble or al_contenders:
+        al_lines.append("*🇺🇸 American League*")
+        
+        # Show bubble teams (up to 4)
+        if al_bubble:
+            al_lines.append("  _On the Bubble:_")
+            for t in al_bubble[:4]:
+                al_lines.append(f"  • *{t['team']}*: *{t['po_pct']:.1f}%* PO (Proj: {t['avg_w']:.1f}-{t['avg_l']:.1f})")
+                
+        # Show top contenders (briefly)
+        if al_contenders:
+            contender_names = [f"*{t['team']}* ({t['po_pct']:.0f}%)" for t in al_contenders[:3]]
+            al_lines.append(f"  _Heavy Favorites:_ {', '.join(contender_names)}")
+
+    # 2. National League (NL)
+    nl_data = odds_data.get("NL", {})
+    nl_bubble = nl_data.get("bubble", [])
+    nl_contenders = nl_data.get("contenders", [])
+
+    if nl_bubble or nl_contenders:
+        nl_lines.append("*🇪🇺 National League*")
+        
+        # Show bubble teams (up to 4)
+        if nl_bubble:
+            nl_lines.append("  _On the Bubble:_")
+            for t in nl_bubble[:4]:
+                nl_lines.append(f"  • *{t['team']}*: *{t['po_pct']:.1f}%* PO (Proj: {t['avg_w']:.1f}-{t['avg_l']:.1f})")
+                
+        # Show top contenders (briefly)
+        if nl_contenders:
+            contender_names = [f"*{t['team']}* ({t['po_pct']:.0f}%)" for t in nl_contenders[:3]]
+            nl_lines.append(f"  _Heavy Favorites:_ {', '.join(contender_names)}")
+
+    # Combine text blocks
+    text_content = ""
+    if al_lines:
+        text_content += "\n".join(al_lines)
+    if nl_lines:
+        if text_content:
+            text_content += "\n\n"
+        text_content += "\n".join(nl_lines)
+
+    if text_content:
+        blocks.append({
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": text_content
+            }
+        })
+        blocks.append({"type": "divider"})
+
+    return blocks
+
 def post_daily_digest(blocks):
     if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
         print("Missing Slack configuration. Cannot post to Slack.")
@@ -627,6 +704,9 @@ def trigger_daily_digest():
     print(f"Fetching close division races...")
     races = get_close_division_races(LEAGUE_URL)
 
+    print(f"Fetching playoff odds...")
+    playoff_odds = get_playoff_odds(LEAGUE_URL)
+
     print(f"Generating trivia question...")
     trivia = get_trivia_question(LEAGUE_URL, state)
 
@@ -647,6 +727,8 @@ def trigger_daily_digest():
         summary_parts.append("Team Analytics")
     if races:
         summary_parts.append(f"{len(races)} Pennant Races")
+    if playoff_odds:
+        summary_parts.append("Playoff Projections")
     if notable_games:
         summary_parts.append(f"{len(notable_games)} Weird Moments")
     if api_oddities:
@@ -676,6 +758,8 @@ def trigger_daily_digest():
         all_blocks.extend(build_notable_games_blocks(notable_games))
     if races:
         all_blocks.extend(build_division_races_blocks(races))
+    if playoff_odds:
+        all_blocks.extend(build_playoff_odds_blocks(playoff_odds))
     if power_rankings:
         all_blocks.extend(build_power_rankings_blocks(power_rankings))
     if trivia:

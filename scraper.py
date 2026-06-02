@@ -198,7 +198,7 @@ TEAM_MAPPING = {
     "CHC": "Chicago Cubs", "CIN": "Cincinnati Reds", "CLE": "Cleveland Indians",
     "COL": "Colorado Rockies", "DET": "Detroit Tigers", "FLA": "Florida Marlins",
     "HOU": "Houston Astros", "KC": "Kansas City Royals", "LAD": "Los Angeles Dodgers",
-    "MIL": "Milwaukee Brewers", "MIN": "Minnesota Twins", "MON": "Montreal Expos",
+    "MIL": "Milwaukee Brewers", "MLW": "Milwaukee Brewers", "MIN": "Minnesota Twins", "MON": "Montreal Expos",
     "NYM": "New York Mets", "NYY": "New York Yankees", "OAK": "Oakland Athletics",
     "PHI": "Philadelphia Phillies", "PIT": "Pittsburgh Pirates", "SD": "San Diego Padres",
     "SF": "San Francisco Giants", "SEA": "Seattle Mariners", "STL": "St. Louis Cardinals",
@@ -324,6 +324,149 @@ def get_close_division_races(league_url="https://statsplus.net/xfbl"):
                             "gb": gb_str
                         })
     return close_races
+
+def get_playoff_odds(league_url="https://statsplus.net/xfbl"):
+    """
+    Scrapes playoff odds from StatsPlus.
+    Only returns data if the season is past the halfway mark (average/max games played >= 80).
+    """
+    playoff_odds_url = f"{league_url.rstrip('/')}/playoffodds/"
+    try:
+        response = requests.get(playoff_odds_url, timeout=15)
+        response.raise_for_status()
+        soup = BeautifulSoup(response.text, 'html.parser')
+    except Exception as e:
+        print(f"Error fetching Playoff Odds page: {e}")
+        return None
+
+    tables = soup.find_all('table')
+    if not tables:
+        return None
+
+    table = tables[0]
+    
+    current_league = None
+    current_division = None
+    
+    teams_data = []
+    
+    for row in table.find_all('tr'):
+        cols = [td.get_text(strip=True) for td in row.find_all('td')]
+        
+        # Check for division header row
+        if len(cols) == 1:
+            header_text = cols[0]
+            if '/' in header_text:
+                parts = header_text.split('/')
+                current_league = parts[0].strip()
+                current_division = parts[1].strip()
+            continue
+            
+        tds = row.find_all('td')
+        if len(tds) > 1:
+            # First column has the team name and abbreviation
+            team_td = tds[0]
+            wide_div = team_td.find('div', class_='wide')
+            abbr = team_td.get('data-name')
+            
+            raw_name = wide_div.get_text(strip=True) if wide_div else team_td.get_text(strip=True)
+            team_name = TEAM_MAPPING.get(abbr, raw_name) if abbr else raw_name
+            
+            # Using find(string=True, recursive=False) to extract cell texts cleanly
+            cell_texts = []
+            for td in tds:
+                first_str = td.find(string=True, recursive=False)
+                val = first_str.strip() if first_str else ""
+                cell_texts.append(val)
+                
+            if len(cell_texts) >= 11:
+                try:
+                    w = int(cell_texts[1])
+                    l = int(cell_texts[2])
+                    avg_w = float(cell_texts[5])
+                    avg_l = float(cell_texts[6])
+                    
+                    # Probability percentages
+                    # Index 7: 1st %, Index 8: Div %, Index 9: PO %
+                    div_pct_str = cell_texts[8]
+                    po_pct_str = cell_texts[9]
+                    
+                    def parse_pct(s):
+                        try:
+                            return float(s.replace('%', ''))
+                        except ValueError:
+                            return 0.0
+                            
+                    div_pct = parse_pct(div_pct_str)
+                    po_pct = parse_pct(po_pct_str)
+                    
+                    teams_data.append({
+                        "team": team_name,
+                        "abbr": abbr or raw_name,
+                        "league": current_league or "Unknown",
+                        "division": current_division or "Unknown",
+                        "w": w,
+                        "l": l,
+                        "games_played": w + l,
+                        "avg_w": avg_w,
+                        "avg_l": avg_l,
+                        "div_pct": div_pct,
+                        "po_pct": po_pct
+                    })
+                except (ValueError, IndexError) as e:
+                    print(f"Error parsing row: {cell_texts}, error: {e}")
+                    
+    if not teams_data:
+        return None
+
+    # Check if the season is past the halfway mark (average/max games played >= 80)
+    max_gp = max(t["games_played"] for t in teams_data)
+    if max_gp < 80:
+        print(f"Season is not past halfway point yet (max games played: {max_gp} < 80). Skipping playoff odds.")
+        return None
+
+    # Group by league (American League -> 'AL', National League -> 'NL')
+    al_bubble = []
+    al_contenders = []
+    nl_bubble = []
+    nl_contenders = []
+    
+    for t in teams_data:
+        is_al = "American" in t["league"] or "AL" in t["league"]
+        
+        # Classify by odds:
+        # Bubble: 10% <= PO % <= 90%
+        # Contenders: > 90%
+        if 10.0 <= t["po_pct"] <= 90.0:
+            if is_al:
+                al_bubble.append(t)
+            else:
+                nl_bubble.append(t)
+        elif t["po_pct"] > 90.0:
+            if is_al:
+                al_contenders.append(t)
+            else:
+                nl_contenders.append(t)
+
+    # Sort bubbles descending by PO %
+    al_bubble.sort(key=lambda x: x["po_pct"], reverse=True)
+    nl_bubble.sort(key=lambda x: x["po_pct"], reverse=True)
+    
+    # Sort contenders descending by PO %
+    al_contenders.sort(key=lambda x: x["po_pct"], reverse=True)
+    nl_contenders.sort(key=lambda x: x["po_pct"], reverse=True)
+    
+    return {
+        "max_gp": max_gp,
+        "AL": {
+            "bubble": al_bubble,
+            "contenders": al_contenders
+        },
+        "NL": {
+            "bubble": nl_bubble,
+            "contenders": nl_contenders
+        }
+    }
 
 def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
     """
