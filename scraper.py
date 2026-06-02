@@ -1046,50 +1046,75 @@ def get_season_phase(league_url, best_pitcher, best_batter):
     Determines the current season phase: 'regular', 'postseason', or 'offseason'.
 
     Logic:
-      1. If both best_pitcher and best_batter are None → no games were played
-         this sim → 'offseason'.
-      2. Otherwise, scrape the recap page and search for known playoff round
-         keywords in the page text. If found → 'postseason'.
-      3. Otherwise → 'regular'.
-
-    Returns one of: 'regular', 'postseason', 'offseason'
+      1. Try to fetch the current game date from the league home page.
+         - If the month is Nov, Dec, Jan, Feb, or Mar → 'offseason'.
+         - If the month is Apr, May, Jun, Jul, Aug, or Sep → default to 'regular'.
+         - If the month is Oct → we check for postseason keywords first. If found,
+           then 'postseason'. Otherwise, 'regular' season.
+      2. Fall back to the legacy best_performances-based heuristic if the home page date cannot be parsed.
     """
-    # Step 1: no game data → offseason
-    if not best_pitcher and not best_batter:
-        print("No game performances found — treating as offseason sim.")
-        return "offseason"
+    current_date = None
+    try:
+        home_html = requests.get(league_url, timeout=15).text
+        home_soup = BeautifulSoup(home_html, 'html.parser')
+        date_element = home_soup.find(string=re.compile(r"Game Date:"))
+        if date_element:
+            date_str = date_element.replace("Game Date:", "").strip()
+            current_date = datetime.strptime(date_str, "%Y-%m-%d")
+    except Exception as e:
+        print(f"Could not fetch/parse game date from homepage: {e}")
 
-    # Step 2: check recap page for playoff keywords (body content only, not nav)
+    # Step 1: Check recap page and scores report page for playoff keywords first
+    is_postseason = False
     recap_url = f"{league_url.rstrip('/')}/recap/"
     try:
         resp = requests.get(recap_url, timeout=15)
         soup = BeautifulSoup(resp.text, 'html.parser')
-        # Remove nav and footer to avoid false positives from "Playoff Odds" nav links
         for tag in soup.find_all(['nav', 'footer']):
             tag.decompose()
         body_text = soup.get_text(separator=' ').lower()
         for keyword in PLAYOFF_KEYWORDS:
             if keyword in body_text:
                 print(f"Playoff keyword detected in recap body: '{keyword}' → postseason.")
-                return "postseason"
+                is_postseason = True
+                break
     except Exception as e:
         print(f"Could not fetch recap page for phase detection: {e}")
 
-    # Step 3: check OOTP scores report page title (e.g. "ALCS Game 3" vs "Scoreboard: August 13")
-    scores_report_url = f"{REPORTS_BASE}/league_100_scores.html"
-    try:
-        resp = requests.get(scores_report_url, timeout=15)
-        title = BeautifulSoup(resp.text, 'html.parser').find('title')
-        if title:
-            title_lower = title.get_text().lower()
-            for keyword in PLAYOFF_KEYWORDS:
-                if keyword in title_lower:
-                    print(f"Playoff keyword in scores report title: '{keyword}' → postseason.")
-                    return "postseason"
-    except Exception as e:
-        print(f"Could not fetch scores report for phase detection: {e}")
+    if not is_postseason:
+        scores_report_url = f"{REPORTS_BASE}/league_100_scores.html"
+        try:
+            resp = requests.get(scores_report_url, timeout=15)
+            title = BeautifulSoup(resp.text, 'html.parser').find('title')
+            if title:
+                title_lower = title.get_text().lower()
+                for keyword in PLAYOFF_KEYWORDS:
+                    if keyword in title_lower:
+                        print(f"Playoff keyword in scores report title: '{keyword}' → postseason.")
+                        is_postseason = True
+                        break
+        except Exception as e:
+            print(f"Could not fetch scores report for phase detection: {e}")
+
+    if is_postseason:
+        return "postseason"
+
+    # Step 2: Use Game Date month to decide between regular and offseason
+    if current_date:
+        if current_date.month in [11, 12, 1, 2, 3]:
+            print(f"Game date month is {current_date.month} (Nov-Mar) — treating as offseason.")
+            return "offseason"
+        else:
+            print(f"Game date month is {current_date.month} (Apr-Oct) — treating as regular season.")
+            return "regular"
+
+    # Step 3: Fallback to old behavior if no game date could be fetched
+    if not best_pitcher and not best_batter:
+        print("No game performances found and could not parse game date — treating as offseason.")
+        return "offseason"
 
     return "regular"
+
 
 
 def get_streaks_and_records(league_url, state):
