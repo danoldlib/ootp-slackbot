@@ -27,4 +27,3 @@ try:
         print("Games API returned:", r.status_code)
 except Exception as e:
     print("Games API error:", e)
-

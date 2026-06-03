@@ -1444,21 +1444,38 @@ def get_trivia_question(league_url, state):
 
     # Batter trivia candidates: top WAR, best AVG, worst AVG, most HR
     if qualified_bat:
+        def calc_avg(r):
+            h = safe_int(r, 'h')
+            ab = safe_int(r, 'ab')
+            return h / ab if ab > 0 else 0.0
+
+        def calc_obp(r):
+            h = safe_int(r, 'h')
+            bb = safe_int(r, 'bb')
+            hp = safe_int(r, 'hp')
+            ab = safe_int(r, 'ab')
+            sf = safe_int(r, 'sf')
+            denom = ab + bb + hp + sf
+            return (h + bb + hp) / denom if denom > 0 else 0.0
+
         war_king = max(qualified_bat, key=lambda r: safe_float(r, 'war'))
-        avg = safe_float(war_king, 'avg')
+        avg = calc_avg(war_king)
         hr = safe_int(war_king, 'hr')
         rbi = safe_int(war_king, 'rbi')
         war = safe_float(war_king, 'war')
         pa = safe_int(war_king, 'pa')
-        q = f"This batter leads all position players with *{war:.1f} WAR*. They're hitting *.{int(avg*1000):03d}* with *{hr} HR* and *{rbi} RBI* in *{pa} PA*. Who is it? 🤔"
+        avg_str = f"{avg:.3f}".lstrip('0')
+        q = f"This batter leads all position players with *{war:.1f} WAR*. They're hitting *{avg_str}* with *{hr} HR* and *{rbi} RBI* in *{pa} PA*. Who is it? 🤔"
         candidates.append({"question": q, "answer": pname(war_king['player_id']), "type": "batter_war"})
 
         hr_king = max(qualified_bat, key=lambda r: safe_int(r, 'hr'))
         hrs = safe_int(hr_king, 'hr')
-        avg2 = safe_float(hr_king, 'avg')
+        avg2 = calc_avg(hr_king)
         rbi2 = safe_int(hr_king, 'rbi')
-        obp = safe_float(hr_king, 'obp')
-        q = f"This slugger leads the league with *{hrs} home runs*. They're batting *.{int(avg2*1000):03d}* with a *.{int(obp*1000):03d} OBP* and *{rbi2} RBI*. Who is it? 🤔"
+        obp = calc_obp(hr_king)
+        avg2_str = f"{avg2:.3f}".lstrip('0')
+        obp_str = f"{obp:.3f}".lstrip('0')
+        q = f"This slugger leads the league with *{hrs} home runs*. They're batting *{avg2_str}* with a *{obp_str} OBP* and *{rbi2} RBI*. Who is it? 🤔"
         candidates.append({"question": q, "answer": pname(hr_king['player_id']), "type": "batter_hr"})
 
     def calc_era(r):
