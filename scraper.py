@@ -631,6 +631,11 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
         try: return float(d.get(key, default) or default)
         except: return default
 
+    def calc_avg(r):
+        h = safe_int(r, 'h')
+        ab = safe_int(r, 'ab')
+        return h / ab if ab > 0 else 0.0
+
     qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= 100]
 
     if qualified_bat:
@@ -708,12 +713,14 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "📉", "winner_id": wpa_loser['player_id']
             }
 
-        avg_losers = [r for r in qualified_bat if safe_float(r, 'avg') > 0]
+        avg_losers = [r for r in qualified_bat if calc_avg(r) > 0]
         if avg_losers:
-            avg_loser = min(avg_losers, key=lambda r: safe_float(r, 'avg'))
+            avg_loser = min(avg_losers, key=calc_avg)
             name, team = pname(avg_loser['player_id'], avg_loser['team_id'])
+            avg_val = calc_avg(avg_loser)
+            avg_str = f"{avg_val:.3f}".lstrip('0')
             all_oddities["human_out"] = {
-                "text": f"🧱 *Human Out:* {name} ({team}) is hitting a paltry *.{int(safe_float(avg_loser, 'avg') * 1000):03d}* — making outs is basically his full-time job.",
+                "text": f"🧱 *Human Out:* {name} ({team}) is hitting a paltry *{avg_str}* — making outs is basically his full-time job.",
                 "emoji": "🧱", "winner_id": avg_loser['player_id']
             }
 
