@@ -1103,21 +1103,63 @@ def get_season_phase(league_url, best_pitcher, best_batter):
         except Exception as e:
             print(f"Could not fetch scores report for phase detection: {e}")
 
-    if is_postseason:
+    # Step 2: Check games played in standings/odds to detect ended regular season
+    avg_gp = 0.0
+    try:
+        odds_url = f"{league_url.rstrip('/')}/playoffodds/"
+        resp = requests.get(odds_url, timeout=15)
+        if resp.status_code == 200:
+            soup = BeautifulSoup(resp.text, 'html.parser')
+            tables = soup.find_all('table')
+            if tables:
+                table = tables[0]
+                gps = []
+                for row in table.find_all('tr'):
+                    tds = row.find_all('td')
+                    if len(tds) > 1:
+                        cell_texts = []
+                        for td in tds:
+                            first_str = td.find(string=True, recursive=False)
+                            val = first_str.strip() if first_str else ""
+                            cell_texts.append(val)
+                        if len(cell_texts) >= 3:
+                            try:
+                                w = int(cell_texts[1])
+                                l = int(cell_texts[2])
+                                gps.append(w + l)
+                            except ValueError:
+                                pass
+                if gps:
+                    avg_gp = sum(gps) / len(gps)
+                    print(f"Average games played parsed for phase detection: {avg_gp:.2f}")
+    except Exception as e:
+        print(f"Could not fetch/parse playoff odds for phase detection: {e}")
+
+    is_postseason_by_games = False
+    if current_date:
+        if current_date.month not in [11, 12, 1, 2, 3] and avg_gp >= 161.5:
+            print(f"Average games played is {avg_gp:.2f} >= 161.5 in month {current_date.month} -> postseason.")
+            is_postseason_by_games = True
+    else:
+        if avg_gp >= 161.5 and (best_pitcher or best_batter):
+            print(f"Average games played is {avg_gp:.2f} >= 161.5 with active performances -> postseason.")
+            is_postseason_by_games = True
+
+    if is_postseason or is_postseason_by_games:
         return "postseason"
 
-    # Step 2: Use Game Date month to decide between regular and offseason
+    # Step 3: Use Game Date month to decide between regular and offseason
     if current_date:
         if current_date.month in [11, 12, 1, 2, 3]:
-            print(f"Game date month is {current_date.month} (Nov-Mar) — treating as offseason.")
+            print(f"Game date month is {current_date.month} (Nov-Mar) -- treating as offseason.")
             return "offseason"
         else:
-            print(f"Game date month is {current_date.month} (Apr-Oct) — treating as regular season.")
+            print(f"Game date month is {current_date.month} (Apr-Oct) -- treating as regular season.")
             return "regular"
 
-    # Step 3: Fallback to old behavior if no game date could be fetched
+    # Step 4: Fallback to old behavior if no game date could be fetched
     if not best_pitcher and not best_batter:
-        print("No game performances found and could not parse game date — treating as offseason.")
+        print("No game performances found and could not parse game date -- treating as offseason.")
         return "offseason"
 
     return "regular"
@@ -1293,7 +1335,7 @@ def get_milestone_countdowns(league_url):
     HR_MILESTONES = [100, 200, 300, 400, 500]
     WIN_MILESTONES = [100, 150, 200, 250, 300]
     K_MILESTONES = [500, 1000, 1500, 2000, 2500, 3000]
-    SAVE_MILESTONES = [50, 100, 200, 300]
+    SAVE_MILESTONES = [100, 200, 300, 400, 500]
     LOOKAHEAD = 30  # only surface if within this many of the milestone
 
     def fetch_csv(url):
