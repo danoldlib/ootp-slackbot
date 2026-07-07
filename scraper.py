@@ -1657,9 +1657,172 @@ def get_offseason_transactions(league_url="https://statsplus.net/xfbl", max_days
     return transactions
 
 
+def get_offseason_data(league_url="https://statsplus.net/xfbl", days_back=7):
+    """
+    Scrapes both the news page and the transactions page for updates within the sim window.
+    Categorizes events and returns a dict with:
+      - awards: list of award strings
+      - trades: list of trade strings
+      - major_signings: list of major FA signing strings
+      - retirements_hof: list of retirement/HOF strings
+      - financials: list of owner profit/finance strings
+      - minor_moves: list of all other minor league transactions/roster moves
+      - cutoff_date: datetime object of lookback limit
+      - current_date: datetime object of current league date
+    """
+    # 1. Establish timeframe
+    try:
+        home_html = requests.get(league_url).text
+        home_soup = BeautifulSoup(home_html, 'html.parser')
+        date_element = home_soup.find(string=re.compile(r"Game Date:"))
+        if date_element:
+            date_str = date_element.replace("Game Date:", "").strip()
+            current_date = datetime.strptime(date_str, "%Y-%m-%d")
+        else:
+            current_date = datetime.now()
+    except Exception:
+        current_date = datetime.now()
+        
+    cutoff_date = current_date - timedelta(days=days_back)
+    print(f"Offseason lookback: {cutoff_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}")
+
+    awards = []
+    trades = []
+    major_signings = []
+    retirements_hof = []
+    financials = []
+    minor_moves = []
+    
+    seen_events = set()
+    
+    def is_duplicate(text):
+        normalized = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
+        if normalized in seen_events:
+            return True
+        seen_events.add(normalized)
+        return False
+
+    # A. Scrape News Report
+    news_url = f"{REPORTS_BASE}/league_100_news.html"
+    try:
+        resp = requests.get(news_url, timeout=15)
+        news_soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        print(f"Error fetching news report: {e}")
+        news_soup = None
+
+    if news_soup:
+        for table in news_soup.find_all('table', class_='data'):
+            th = table.find('th', class_='dl')
+            if not th:
+                continue
+            date_str = th.get_text(separator=' ', strip=True)
+            event_date = parse_ootp_date(date_str)
+            if not event_date or not (cutoff_date <= event_date <= current_date):
+                continue
+                
+            for tr in table.find_all('tr'):
+                td = tr.find('td', class_=lambda c: c and 'dl' in c)
+                if not td:
+                    continue
+                text = td.get_text(separator=' ', strip=True)
+                if is_duplicate(text):
+                    continue
+                
+                text_lower = text.lower()
+                
+                if "wins the" in text_lower or "honored:" in text_lower or "award" in text_lower:
+                    if "finished" not in text_lower:
+                        awards.append(text)
+                elif "inducted into" in text_lower or "hall of fame" in text_lower or "retired" in text_lower:
+                    retirements_hof.append(text)
+                elif "owner took" in text_lower or "cash as profit" in text_lower or "received" in text_lower and "from the owner" in text_lower:
+                    financials.append(text)
+                elif "traded" in text_lower:
+                    trades.append(text)
+                elif "signed" in text_lower or "contract extension" in text_lower:
+                    contract_match = re.search(r'(\d+)-year contract worth a total of \$([0-9,]+)', text)
+                    is_major = False
+                    if contract_match:
+                        years = int(contract_match.group(1))
+                        total_val = int(contract_match.group(2).replace(',', ''))
+                        avg_val = total_val / years
+                        if avg_val >= 4000000 or total_val >= 10000000:
+                            is_major = True
+                    if is_major:
+                        major_signings.append(text)
+                    else:
+                        minor_moves.append(text)
+                elif "trading block" in text_lower:
+                    minor_moves.append(text)
+
+    # B. Scrape Transactions Report
+    tx_url = f"{REPORTS_BASE}/league_100_transactions_0_0.html"
+    try:
+        resp = requests.get(tx_url, timeout=15)
+        tx_soup = BeautifulSoup(resp.text, 'html.parser')
+    except Exception as e:
+        print(f"Error fetching transactions report: {e}")
+        tx_soup = None
+
+    if tx_soup:
+        for table in tx_soup.find_all('table', class_='data'):
+            th = table.find('th', class_='dl')
+            if not th:
+                continue
+            date_str = th.get_text(separator=' ', strip=True)
+            event_date = parse_ootp_date(date_str)
+            if not event_date or not (cutoff_date <= event_date <= current_date):
+                continue
+                
+            for tr in table.find_all('tr'):
+                td = tr.find('td', class_=lambda c: c and 'dl' in c)
+                if not td:
+                    continue
+                text = td.get_text(separator=' ', strip=True)
+                if is_duplicate(text):
+                    continue
+                
+                # Clean prefix "Team: " if present
+                team_tag = td.find('a')
+                team = team_tag.get_text(strip=True) if team_tag else ""
+                clean_text = re.sub(r'^[^:]+:\s*', '', text).strip()
+                display_text = f"{team}: {clean_text}" if team else clean_text
+                
+                text_lower = text.lower()
+                if "traded" in text_lower or "exchange for" in text_lower:
+                    trades.append(display_text)
+                elif "signed" in text_lower or "contract extension" in text_lower:
+                    contract_match = re.search(r'(\d+)-year contract worth a total of \$([0-9,]+)', clean_text)
+                    is_major = False
+                    if contract_match:
+                        years = int(contract_match.group(1))
+                        total_val = int(contract_match.group(2).replace(',', ''))
+                        avg_val = total_val / years
+                        if avg_val >= 4000000 or total_val >= 10000000:
+                            is_major = True
+                    if is_major:
+                        major_signings.append(display_text)
+                    else:
+                        minor_moves.append(display_text)
+                elif "retired" in text_lower:
+                    retirements_hof.append(display_text)
+                else:
+                    minor_moves.append(display_text)
+
+    return {
+        "awards": awards,
+        "trades": trades,
+        "major_signings": major_signings,
+        "retirements_hof": retirements_hof,
+        "financials": financials,
+        "minor_moves": minor_moves,
+        "cutoff_date": cutoff_date,
+        "current_date": current_date
+    }
+
+
 if __name__ == "__main__":
-
-
     best_pitcher, best_batter = get_best_performances()
     print("Best Pitcher:", best_pitcher)
     print("Best Batter:", best_batter)

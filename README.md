@@ -2,7 +2,7 @@
 
 A Python automation script that interfaces with an OOTP StatsPlus league portal (e.g., XFBL) to deliver rich sim recaps, player awards, team analytics, statistical oddities, trivia, and season-aware updates directly to your league's Slack channel.
 
-The bot listens for the StatsPlus sim completion message, waits 3 minutes for data to propagate, then posts a fully automated "Daily Digest" to your channel.
+The bot listens for the League File update message, waits 3 minutes for data to propagate, then posts a fully automated "Daily Digest" to your channel.
 
 ---
 
@@ -91,10 +91,16 @@ The bot automatically detects the current phase of the OOTP season and adjusts i
 |---|---|---|
 | **Regular Season** | Games found in best performances | Full digest (all sections above) |
 | **Postseason** | Playoff keywords found in recap or scores report | 🏆 Playoff digest: performances + headlines + notable games only |
-| **Offseason** | No game performances found this sim | 💤 Short update with real roster transactions from the OOTP report |
+| **Offseason** | No game performances found this sim | 💤 Rich offseason digest: major awards, trades, major FA signings, HOF/retirements, owner decisions/finances, and condensed roster moves |
 
-### Offseason Transactions
-During offseason sims (when no games are played), the bot scrapes the OOTP transactions report and lists actual roster moves grouped by date — DL placements, activations, waivers, minors assignments — so the channel still gets useful information.
+### Offseason Digest
+During offseason sims (when no games are played), the bot scrapes both the OOTP news and transactions reports to build a categorized offseason summary:
+- **🏆 Major League Awards**: Cy Young, MVP, Rookie of the Year, Reliever of the Year, Gold Gloves, Silver Sluggers, etc.
+- **🤝 Offseason Trades**: Roster trades between teams.
+- **⭐ Major Free Agent Signings**: Highlights signings with contracts of $10M+ total value or average annual salary of $4M+.
+- **🎓 Retirements & Hall of Fame**: Inductions and players hangin' up the cleats.
+- **💰 Owner Decisions & Financials**: Ownership cash profit withdrawals or cash injections.
+- **📋 Roster Moves & Minor Signings**: Bulleted summary of minor league signings, waiver claims, releases, and DL moves (capped at 15 to avoid text spam).
 
 ---
 
@@ -159,7 +165,7 @@ This runs the bot in the background and automatically restarts it if it crashes 
 
 ## Usage
 
-Once running, the bot sits idle in the background and triggers automatically when it detects the message **"StatsPlus website has been updated"** in your Slack channel. It waits 3 minutes for data to propagate, then posts the full digest.
+Once running, the bot sits idle in the background and triggers automatically when it detects the message **"League File has been updated"** from the "File Watcher" bot in your Slack channel. It waits 3 minutes for data to propagate, then posts the full digest.
 
 ### Running a Manual Digest
 

@@ -14,7 +14,7 @@ from scraper import (
     get_notable_games, get_api_oddities, get_sim_analytics,
     get_streaks_and_records, get_milestone_countdowns, get_trivia_question,
     get_season_phase, get_power_rankings, get_offseason_transactions,
-    get_playoff_odds
+    get_offseason_data, get_playoff_odds
 )
 
 # Load environment variables
@@ -575,10 +575,9 @@ def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
     return blocks
 
 
-def build_offseason_blocks(transactions=None):
+def build_offseason_blocks(offseason_data):
     """
-    Posts an offseason sim update. If transactions are available, lists the
-    real roster moves that happened. Falls back to flavor text if empty.
+    Builds a detailed offseason digest from categorized offseason data.
     """
     import random
     flavor_lines = [
@@ -588,6 +587,10 @@ def build_offseason_blocks(transactions=None):
         "It's quiet on the diamond, but busy in the front office.",
         "The offseason grind continues. Every move matters for next year.",
     ]
+    
+    cutoff_date = offseason_data.get("cutoff_date")
+    current_date = offseason_data.get("current_date")
+    
     blocks = [
         {
             "type": "header",
@@ -601,37 +604,104 @@ def build_offseason_blocks(transactions=None):
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"_{random.choice(flavor_lines)}_"
+                "text": f"_{random.choice(flavor_lines)}_\n_Sim window: *{cutoff_date.strftime('%B %d, %Y')}* to *{current_date.strftime('%B %d, %Y')}*_"
             }
-        }
+        },
+        {"type": "divider"}
     ]
 
-    if transactions:
-        # Group by date
-        from collections import defaultdict
-        by_date = defaultdict(list)
-        for t in transactions:
-            by_date[t["date"]].append(t)
+    def split_lines_to_blocks(lines, title, emoji):
+        sec_blocks = []
+        current_block_lines = []
+        current_length = 0
+        block_num = 1
+        
+        for line in lines:
+            formatted_line = f"{emoji} {line}"
+            if current_length + len(formatted_line) + 2 > 2800:
+                section_title = f"*{title} (Part {block_num})*" if block_num > 1 else f"*{title}*"
+                sec_blocks.append({
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": f"{section_title}\n" + "\n".join(current_block_lines)
+                    }
+                })
+                sec_blocks.append({"type": "divider"})
+                current_block_lines = [formatted_line]
+                current_length = len(formatted_line)
+                block_num += 1
+            else:
+                current_block_lines.append(formatted_line)
+                current_length += len(formatted_line) + 1
+                
+        if current_block_lines:
+            section_title = f"*{title} (Part {block_num})*" if block_num > 1 else f"*{title}*"
+            sec_blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"{section_title}\n" + "\n".join(current_block_lines)
+                }
+            })
+            sec_blocks.append({"type": "divider"})
+            
+        return sec_blocks
 
-        tx_lines = ["*📋 Recent Roster Moves*", ""]
-        for date, moves in list(by_date.items())[:3]:  # cap at 3 date groups
-            tx_lines.append(f"__{date}__")
-            for m in moves[:8]:  # cap moves per day
-                tx_lines.append(f"• *{m['team']}*: {m['action']}")
-            tx_lines.append("")
+    # 1. Awards
+    awards = offseason_data.get("awards", [])
+    if awards:
+        blocks.extend(split_lines_to_blocks(awards, "Major League Awards", "🏆"))
 
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(tx_lines).strip()}
-        })
-    else:
+    # 2. Trades
+    trades = offseason_data.get("trades", [])
+    if trades:
+        blocks.extend(split_lines_to_blocks(trades, "Offseason Trades", "🤝"))
+
+    # 3. Major Signings
+    major_signings = offseason_data.get("major_signings", [])
+    if major_signings:
+        blocks.extend(split_lines_to_blocks(major_signings, "Major Free Agent Signings", "⭐"))
+
+    # 4. Retirements & HOF
+    retirements_hof = offseason_data.get("retirements_hof", [])
+    if retirements_hof:
+        blocks.extend(split_lines_to_blocks(retirements_hof, "Retirements & Hall of Fame", "🎓"))
+
+    # 5. Financials
+    financials = offseason_data.get("financials", [])
+    if financials:
+        blocks.extend(split_lines_to_blocks(financials, "Owner Decisions & Financials", "💰"))
+
+    # 6. Minor Moves & Roster moves
+    minor_moves = offseason_data.get("minor_moves", [])
+    if minor_moves:
+        cap = 15
+        minor_display = minor_moves[:cap]
+        minor_text = "\n".join([f"• {m}" for m in minor_display])
+        if len(minor_moves) > cap:
+            minor_text += f"\n_...and {len(minor_moves) - cap} other minor moves._"
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "No transactions logged this sim. Check the site for the latest moves."
+                "text": f"*📋 Roster Moves & Minor Signings*\n{minor_text}"
             }
         })
+    else:
+        # Fallback if there is absolutely nothing else
+        if not awards and not trades and not major_signings and not retirements_hof and not financials:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": "No transactions or news logged this sim. The stove is currently cold."
+                }
+            })
+
+    # Clean trailing divider if it exists
+    if blocks and blocks[-1].get("type") == "divider":
+        blocks.pop()
 
     return blocks
 
@@ -657,10 +727,10 @@ def trigger_daily_digest():
 
     # ── OFFSEASON ─────────────────────────────────────────────────────────────
     if season_phase == "offseason":
-        print("Offseason sim detected — posting short update, skipping rotation state.")
-        print("Fetching offseason transactions...")
-        transactions = get_offseason_transactions(LEAGUE_URL)
-        all_blocks = build_offseason_blocks(transactions)
+        print("Offseason sim detected — posting detailed update, skipping rotation state.")
+        print("Fetching offseason transactions & news...")
+        offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        all_blocks = build_offseason_blocks(offseason_data)
         post_daily_digest(all_blocks)
         return
 
@@ -772,20 +842,20 @@ def trigger_daily_digest():
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
 
-@app.message(re.compile(r"StatsPlus website.*has been updated", re.IGNORECASE))
+@app.message(re.compile(r"League File.*has been updated", re.IGNORECASE))
 def handle_sim_complete(message, say):
     if message.get("subtype") == "message_changed":
         print("Ignoring message_changed event to prevent duplicate triggers.")
         return
 
-    # Ensure it's actually from the StatsPlus bot if a bot sent it
+    # Ensure it's actually from the File Watcher bot if a bot sent it
     bot_name = message.get("username") or message.get("bot_profile", {}).get("name")
-    if bot_name and "statsplus" not in bot_name.lower():
-        print(f"Ignoring message from non-StatsPlus bot: {bot_name}")
+    if bot_name and "file watcher" not in bot_name.lower():
+        print(f"Ignoring message from non-File Watcher bot: {bot_name}")
         return
 
     print(f"✅ MATCH FOUND: {message.get('text')}")
-    print("🚀 Detected StatsPlus update message! Waiting 3 minutes before scraping...")
+    print("🚀 Detected League File update message! Waiting 3 minutes before scraping...")
     
     def run_delayed_digest():
         time.sleep(180)
