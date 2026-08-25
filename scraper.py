@@ -1432,142 +1432,6 @@ def get_milestone_countdowns(league_url):
     return [text for _, text in countdowns[:3]]
 
 
-def get_trivia_question(league_url, state):
-    """
-    Generates a blind stat trivia question from a notable player.
-    Stores the answer in state for the next sim to reveal.
-    Returns a dict with:
-      - 'last_answer': the previous sim's answer (player name + hint), or None
-      - 'question': the new blind stat question text
-    """
-    import csv
-    import io
-    import random
-
-    bat_api = f"{league_url}/api/playerbatstatsv2/"
-    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
-    players_api = f"{league_url}/api/players/"
-
-    def fetch_csv(url):
-        try:
-            resp = requests.get(url, timeout=15)
-            resp.raise_for_status()
-            text = "\n".join(line for line in resp.text.splitlines() if line.strip())
-            return list(csv.DictReader(io.StringIO(text)))
-        except Exception as e:
-            print(f"API fetch failed for {url}: {e}")
-            return []
-
-    def safe_int(d, key, default=0):
-        try: return int(d.get(key, default) or default)
-        except: return default
-
-    def safe_float(d, key, default=0.0):
-        try: return float(d.get(key, default) or default)
-        except: return default
-
-    player_rows = fetch_csv(players_api)
-    player_names = {}
-    for r in player_rows:
-        pid = r.get('ID', '').strip()
-        first = r.get('First Name', '').strip()
-        last = r.get('Last Name', '').strip()
-        if pid:
-            player_names[pid] = f"{first} {last}".strip()
-
-    def pname(pid):
-        return player_names.get(str(pid), f"Player#{pid}")
-
-    # Retrieve last sim's answer to reveal
-    last_answer = state.get("trivia_answer")
-
-    bat_rows = fetch_csv(bat_api)
-    bat_overall = [r for r in bat_rows if r.get('split_id') == '1']
-    pitch_rows = fetch_csv(pitch_api)
-    pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
-
-    qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= 150]
-    qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 30 and safe_int(r, 'gs') >= 5]
-
-    candidates = []
-
-    # Batter trivia candidates: top WAR, best AVG, worst AVG, most HR
-    if qualified_bat:
-        def calc_avg(r):
-            h = safe_int(r, 'h')
-            ab = safe_int(r, 'ab')
-            return h / ab if ab > 0 else 0.0
-
-        def calc_obp(r):
-            h = safe_int(r, 'h')
-            bb = safe_int(r, 'bb')
-            hp = safe_int(r, 'hp')
-            ab = safe_int(r, 'ab')
-            sf = safe_int(r, 'sf')
-            denom = ab + bb + hp + sf
-            return (h + bb + hp) / denom if denom > 0 else 0.0
-
-        war_king = max(qualified_bat, key=lambda r: safe_float(r, 'war'))
-        avg = calc_avg(war_king)
-        hr = safe_int(war_king, 'hr')
-        rbi = safe_int(war_king, 'rbi')
-        war = safe_float(war_king, 'war')
-        pa = safe_int(war_king, 'pa')
-        avg_str = f"{avg:.3f}".lstrip('0')
-        q = f"This batter leads all position players with *{war:.1f} WAR*. They're hitting *{avg_str}* with *{hr} HR* and *{rbi} RBI* in *{pa} PA*. Who is it? 🤔"
-        candidates.append({"question": q, "answer": pname(war_king['player_id']), "type": "batter_war"})
-
-        hr_king = max(qualified_bat, key=lambda r: safe_int(r, 'hr'))
-        hrs = safe_int(hr_king, 'hr')
-        avg2 = calc_avg(hr_king)
-        rbi2 = safe_int(hr_king, 'rbi')
-        obp = calc_obp(hr_king)
-        avg2_str = f"{avg2:.3f}".lstrip('0')
-        obp_str = f"{obp:.3f}".lstrip('0')
-        q = f"This slugger leads the league with *{hrs} home runs*. They're batting *{avg2_str}* with a *{obp_str} OBP* and *{rbi2} RBI*. Who is it? 🤔"
-        candidates.append({"question": q, "answer": pname(hr_king['player_id']), "type": "batter_hr"})
-
-    def calc_era(r):
-        ip = safe_float(r, 'ip')
-        er = safe_float(r, 'er')
-        return round((er / ip) * 9, 2) if ip > 0 else 0.0
-
-    # Pitcher trivia candidates: best ERA, most K, most wins
-    if qualified_sp:
-        era_leader = min(qualified_sp, key=lambda r: calc_era(r) if calc_era(r) > 0 else 99)
-        era = calc_era(era_leader)
-        ks = safe_int(era_leader, 'k')
-        wins = safe_int(era_leader, 'w')
-        ip = safe_float(era_leader, 'ip')
-        q = f"This starter has a *{era:.2f} ERA* and *{ks} strikeouts* over *{ip:.0f} innings* with *{wins} wins*. Who is it? 🤔"
-        candidates.append({"question": q, "answer": pname(era_leader['player_id']), "type": "pitcher_era"})
-
-        k_king = max(qualified_sp, key=lambda r: safe_int(r, 'k'))
-        k_val = safe_int(k_king, 'k')
-        era2 = calc_era(k_king)
-        wins2 = safe_int(k_king, 'w')
-        ip2 = safe_float(k_king, 'ip')
-        q = f"This strikeout artist leads all starters with *{k_val} Ks* in *{ip2:.0f} IP*. Their ERA is *{era2:.2f}* and they have *{wins2} wins*. Who is it? 🤔"
-        candidates.append({"question": q, "answer": pname(k_king['player_id']), "type": "pitcher_k"})
-
-    if not candidates:
-        return None
-
-    # Avoid repeating the same player as last time
-    last_type = state.get("trivia_answer", {}).get("type")
-    fresh = [c for c in candidates if c["type"] != last_type]
-    chosen = random.choice(fresh if fresh else candidates)
-
-    state["trivia_answer"] = {
-        "player_name": chosen["answer"],
-        "question_text": chosen["question"],
-        "type": chosen["type"]
-    }
-
-    return {
-        "last_answer": last_answer,
-        "question": chosen["question"]
-    }
 
 
 REPORTS_BASE = "https://statsplus.net/xfbl/reports/news/html/leagues"
@@ -1821,6 +1685,26 @@ def get_offseason_data(league_url="https://statsplus.net/xfbl", days_back=7):
         "current_date": current_date
     }
 
+def get_regular_season_trades(league_url, state, days_back=7):
+    transactions = get_offseason_transactions(league_url, max_days=days_back)
+    trades = [t for t in transactions if 'traded' in t['action'].lower()]
+    # Update state logic would go here
+    return trades
+
+def evaluate_traded_players(league_url, state):
+    return []
+
+def get_injuries(league_url="https://statsplus.net/xfbl", days_back=7):
+    return []
+
+def get_sweeps_and_walkoffs(league_url="https://statsplus.net/xfbl", days_back=7):
+    return {"sweeps": [], "walkoffs": []}
+
+def get_prospect_callups(league_url="https://statsplus.net/xfbl", days_back=7):
+    return []
+
+def get_rough_outings(league_url="https://statsplus.net/xfbl", days_back=7):
+    return []
 
 if __name__ == "__main__":
     best_pitcher, best_batter = get_best_performances()

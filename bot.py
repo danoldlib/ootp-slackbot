@@ -12,9 +12,11 @@ from scraper import (
     get_best_performances, get_headlines_and_milestones,
     get_team_momentum, get_team_luck, get_close_division_races,
     get_notable_games, get_api_oddities, get_sim_analytics,
-    get_streaks_and_records, get_milestone_countdowns, get_trivia_question,
+    get_streaks_and_records, get_milestone_countdowns,
     get_season_phase, get_power_rankings, get_offseason_transactions,
-    get_offseason_data, get_playoff_odds
+    get_offseason_data, get_playoff_odds,
+    get_regular_season_trades, evaluate_traded_players, get_injuries,
+    get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings
 )
 
 # Load environment variables
@@ -275,37 +277,20 @@ def build_analytics_blocks(analytics_data, streak_callouts=None, milestones=None
     return blocks
 
 
-def build_trivia_blocks(trivia):
-    """
-    Builds the trivia section. Reveals the previous sim's answer if available,
-    then posts the new blind stat challenge.
-    """
-    if not trivia:
-        return []
+def build_trade_tracker_blocks(trades, traded_eval):
+    return []
 
-    blocks = []
-    last_answer = trivia.get("last_answer")
+def build_injury_blocks(injuries):
+    return []
 
-    if last_answer:
-        player_name = last_answer.get("player_name", "Unknown")
-        prev_question = last_answer.get("question_text", "")
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": f"❓ *Last Sim's Trivia Answer:* The answer was *{player_name}*!\n_{prev_question}_"
-            }
-        })
+def build_sweep_walkoff_blocks(data):
+    return []
 
-    blocks.append({
-        "type": "section",
-        "text": {
-            "type": "mrkdwn",
-            "text": f"🧩 *Guess the Player!*\n{trivia['question']}\n_Reply in thread with your guess — answer revealed next sim!_"
-        }
-    })
-    blocks.append({"type": "divider"})
-    return blocks
+def build_prospect_blocks(prospects):
+    return []
+
+def build_rough_outing_blocks(outings):
+    return []
 
 def build_notable_games_blocks(notable_games):
     if not notable_games:
@@ -777,8 +762,21 @@ def trigger_daily_digest():
     print(f"Fetching playoff odds...")
     playoff_odds = get_playoff_odds(LEAGUE_URL)
 
-    print(f"Generating trivia question...")
-    trivia = get_trivia_question(LEAGUE_URL, state)
+    print(f"Fetching regular season trades...")
+    trades = get_regular_season_trades(LEAGUE_URL, state, DAYS_BACK)
+    traded_eval = evaluate_traded_players(LEAGUE_URL, state)
+    
+    print(f"Fetching injuries...")
+    injuries = get_injuries(LEAGUE_URL, DAYS_BACK)
+    
+    print(f"Fetching sweeps and walkoffs...")
+    sweeps_and_walkoffs = get_sweeps_and_walkoffs(LEAGUE_URL, DAYS_BACK)
+    
+    print(f"Fetching prospect callups...")
+    prospects = get_prospect_callups(LEAGUE_URL, DAYS_BACK)
+    
+    print(f"Fetching rough outings...")
+    rough_outings = get_rough_outings(LEAGUE_URL, DAYS_BACK)
 
     # Save updated state (all functions above may have mutated state)
     try:
@@ -805,9 +803,18 @@ def trigger_daily_digest():
         summary_parts.append(f"{len(api_oddities)} League Stats")
     if power_rankings:
         summary_parts.append("Power Rankings")
-    if trivia:
-        summary_parts.append("Trivia")
-
+    if trades or traded_eval:
+        summary_parts.append("Trade Tracker")
+    if injuries:
+        summary_parts.append("Injury Report")
+    if sweeps_and_walkoffs["sweeps"]:
+        summary_parts.append("Sweeps")
+    if sweeps_and_walkoffs["walkoffs"]:
+        summary_parts.append("Walk-offs")
+    if prospects:
+        summary_parts.append("Prospects")
+    if rough_outings:
+        summary_parts.append("Rough Outings")
     summary_text = "Includes: " + ", ".join(summary_parts) if summary_parts else "No notable updates this sim."
 
     print("Building Daily Digest blocks...")
@@ -832,9 +839,16 @@ def trigger_daily_digest():
         all_blocks.extend(build_playoff_odds_blocks(playoff_odds))
     if power_rankings:
         all_blocks.extend(build_power_rankings_blocks(power_rankings))
-    if trivia:
-        all_blocks.extend(build_trivia_blocks(trivia))
-
+    if trades or traded_eval:
+        all_blocks.extend(build_trade_tracker_blocks(trades, traded_eval))
+    if injuries:
+        all_blocks.extend(build_injury_blocks(injuries))
+    if sweeps_and_walkoffs["sweeps"] or sweeps_and_walkoffs["walkoffs"]:
+        all_blocks.extend(build_sweep_walkoff_blocks(sweeps_and_walkoffs))
+    if prospects:
+        all_blocks.extend(build_prospect_blocks(prospects))
+    if rough_outings:
+        all_blocks.extend(build_rough_outing_blocks(rough_outings))
     # Remove the very last divider if it exists
     if all_blocks and all_blocks[-1].get("type") == "divider":
         all_blocks.pop()

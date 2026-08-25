@@ -1,6 +1,6 @@
 # OOTP StatsPlus Slack Bot
 
-A Python automation script that interfaces with an OOTP StatsPlus league portal (e.g., XFBL) to deliver rich sim recaps, player awards, team analytics, statistical oddities, trivia, and season-aware updates directly to your league's Slack channel.
+A Python automation script that interfaces with an OOTP StatsPlus league portal (e.g., XFBL) to deliver rich sim recaps, player awards, team analytics, statistical oddities, and season-aware updates directly to your league's Slack channel.
 
 The bot listens for the League File update message, waits 3 minutes for data to propagate, then posts a fully automated "Daily Digest" to your channel.
 
@@ -33,10 +33,6 @@ Pulls the OOTP-generated team power rankings and surfaces:
 
 ### 🎯 Milestone Countdowns
 Identifies players within 30 of a major career milestone (e.g., 498 career HR → 2 away from 500) and teases the approaching moment.
-
-### 🎲 Guess the Player! (Trivia)
-Each sim poses a blind stat challenge — e.g., *"This starter has a 2.14 ERA and 174 Ks over 172 IP with 15 wins. Who is it?"* — and reveals the previous sim's answer. Tracks trivia history so the same player isn't repeated back-to-back.
-
 ### 📉 By the Numbers: League Oddities
 Mines the StatsPlus CSV API and randomly surfaces 5 of 20+ rotating statistical facts per sim. The rotation avoids repeating the same category or winner consecutively.
 
@@ -78,6 +74,21 @@ Scans recent box scores for memorable events:
 - **Run Fests**: Combined 20+ runs scored
 - **Multi-HR Games**: Any player with 3+ home runs in a single game
 
+### 🤝 Trade Tracker
+Evaluates regular season trades by tracking players moved and reporting on their post-trade WAR and performance.
+
+### 🚑 Devastating Injury Report
+Alerts the channel when a star player goes down for 3+ weeks, identifying massive blows to contenders.
+
+### 🧹 Sweep Watch & 🚨 Walk-off Magic
+Highlights series sweeps and dramatic walk-off wins scraped from the league news recap.
+
+### 👶 Prospect Watch
+Flags when a highly-touted prospect makes their major league debut.
+
+### 📉 Rough Outings (Golden Sombrero)
+The inverse of the Play of the Sim — hilariously flags truly terrible performances, such as 5 strikeouts in a game or a starter getting shelled early.
+
 ### 🏁 Pennant Race Watch
 Flags tight division races where 1st and 2nd place are separated by **2.0 games or less**.
 
@@ -107,13 +118,12 @@ During offseason sims (when no games are played), the bot scrapes both the OOTP 
 ## Persistent State (`state.json`)
 
 The bot maintains a `state.json` file (auto-created on first run) to persist cross-sim data:
-- Trivia question history (to avoid repeats)
 - ELO history per team (for streak detection)
 - Season-high records per stat
 - Last shown oddity categories (for rotation)
 - Last oddity winners (to avoid back-to-back repeats)
 
-> During offseason sims, rotation state is **not** updated — your oddity/trivia rotation picks up exactly where it left off when the regular season resumes.
+> During offseason sims, rotation state is **not** updated — your oddity rotation picks up exactly where it left off when the regular season resumes.
 
 ---
 
@@ -207,6 +217,6 @@ docker-compose logs --tail=100
 
 - **Channel Membership**: The bot **must** be a member of the channel where StatsPlus posts. In Slack, go to the channel and type `/invite @YourBotName`.
 - **Duplicate Posts**: The bot acknowledges Slack events instantly and processes the digest in a background thread, preventing Slack from retrying and causing double posts. It also ignores `message_changed` events and non-StatsPlus bot messages.
-- **Offseason Behavior**: When no games are played (offseason sims), the bot posts a short update with real transactions instead of a full digest. Rotation state (trivia, oddities) is preserved and picks up next regular season.
-- **ERA in Oddities/Trivia**: ERA is calculated live from earned runs and innings pitched (`(ER / IP) * 9`) since the StatsPlus API does not include a pre-computed ERA field.
-- **State Reset**: To reset the trivia/oddity rotation, delete `state.json` in the bot directory. It will be recreated fresh on the next run.
+- **Offseason Behavior**: When no games are played (offseason sims), the bot posts a short update with real transactions instead of a full digest. Rotation state (oddities) is preserved and picks up next regular season.
+- **ERA in Oddities**: ERA is calculated live from earned runs and innings pitched (`(ER / IP) * 9`) since the StatsPlus API does not include a pre-computed ERA field.
+- **State Reset**: To reset the oddity rotation, delete `state.json` in the bot directory. It will be recreated fresh on the next run.
