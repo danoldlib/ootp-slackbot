@@ -20,32 +20,9 @@ def parse_ootp_date(date_str):
 
 def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
     """
-    Scrapes the Best Performances pages from StatsPlus.
-    Finds the highest ranked performance within the designated timeframe.
+    Temporarily disabled as there is no direct StatsPlus API equivalent for daily box scores.
     """
-    bat_url = f"{league_url}/bestgames/bat/"
-    pitch_url = f"{league_url}/bestgames/pitch/"
-    
-    # Get the current game date from S+ home to establish our timeframe
-    try:
-        home_html = requests.get(league_url).text
-        home_soup = BeautifulSoup(home_html, 'html.parser')
-        date_element = home_soup.find(string=re.compile(r"Game Date:"))
-        if date_element:
-            date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-        else:
-            current_date = datetime.now()
-    except Exception:
-        current_date = datetime.now()
-        
-    cutoff_date = current_date - timedelta(days=days_back)
-    print(f"Looking for performances between {cutoff_date.strftime('%Y-%m-%d')} and {current_date.strftime('%Y-%m-%d')}")
-
-    best_batter = scrape_table_with_dates(bat_url, cutoff_date, current_date, league_url, is_pitcher=False)
-    best_pitcher = scrape_table_with_dates(pitch_url, cutoff_date, current_date, league_url, is_pitcher=True)
-    
-    return best_pitcher, best_batter
+    return None, None
 
 def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitcher=False):
     response = requests.get(url)
@@ -119,78 +96,7 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
     return None
 
 def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl"):
-    recap_url = f"{league_url.rstrip('/')}/recap/"
-    try:
-        response = requests.get(recap_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching recap page: {e}")
-        return []
-    
-    headlines = []
-    panel = soup.find(id='recap-msg-panel')
-    if not panel:
-        return headlines
-        
-    for div in panel.find_all('div', class_='smallfont oneline'):
-        text = " ".join(div.text.split())
-        
-        # 1. Career Milestones
-        match = re.search(r'reached (\d+) ([a-z\s]+)', text, re.IGNORECASE)
-        if match:
-            amount = int(match.group(1))
-            stat = match.group(2).strip().lower()
-            
-            is_impressive = False
-            if 'hit' in stat and not 'extra' in stat and amount >= 1000:
-                is_impressive = True
-            elif 'home run' in stat and amount >= 200:
-                is_impressive = True
-            elif 'win' in stat and amount >= 150:
-                is_impressive = True
-            elif 'strikeout' in stat and amount >= 1000:
-                is_impressive = True
-            elif 'save' in stat and amount >= 200:
-                is_impressive = True
-            elif 'rbi' in stat and amount >= 1000:
-                is_impressive = True
-            elif 'extra base' in stat and amount >= 500:
-                is_impressive = True
-                
-            if is_impressive:
-                name_match = re.search(r'^[A-Z0-9]{1,2} ([^\(]+) \(([A-Z]+)\)', text)
-                if name_match:
-                    name = name_match.group(1).strip()
-                    team = name_match.group(2).strip()
-                    headlines.append(f"🎖️ *{name}* ({team}) reached *{amount:,} {stat}*.")
-            continue
-            
-        # 2. Rare Feats & Special Events
-        name_match = re.search(r'^[A-Z0-9]{1,2} ([^\(]+) \(([A-Z]+)\)', text)
-        if name_match:
-            name = name_match.group(1).strip()
-            team = name_match.group(2).strip()
-            
-            if re.search(r'NO-HITTER', text):
-                headlines.append(f"🎩 *NO-HITTER Alert*: {name} ({team}) threw a no-hitter!")
-            elif re.search(r'PERFECT GAME', text):
-                headlines.append(f"👑 *PERFECT GAME Alert*: {name} ({team}) threw a perfect game!")
-            elif re.search(r'hits for the CYCLE', text, re.IGNORECASE):
-                headlines.append(f"🚲 *Cycle Watch*: {name} ({team}) hit for the cycle!")
-            elif re.search(r'WALK-OFF|walk-off', text):
-                headlines.append(f"🚨 *Walk-off Magic*: {name} ({team}) delivered a walk-off hit!")
-            elif re.search(r'Major League debut|MLB debut', text, re.IGNORECASE):
-                headlines.append(f"👶 *Prospect Watch*: {name} ({team}) made his Major League debut.")
-
-    # Deduplicate headlines while preserving order
-    seen = set()
-    deduped = []
-    for h in headlines:
-        if h not in seen:
-            seen.add(h)
-            deduped.append(h)
-            
-    return deduped
+    return []
 
 TEAM_MAPPING = {
     "ANA": "Anaheim Angels", "ARI": "Arizona Diamondbacks", "ATL": "Atlanta Braves",
@@ -214,359 +120,66 @@ def get_full_team_name(raw_text):
     return raw_text
 
 def get_team_momentum(league_url="https://statsplus.net/xfbl"):
-    elo_url = f"{league_url.rstrip('/')}/elo/current/"
-    try:
-        response = requests.get(elo_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching ELO page: {e}")
-        return None, None
-        
-    table = soup.find('table')
-    if not table:
-        return None, None
-        
-    teams_elo = []
-    for row in table.find_all('tr')[1:]:
-        cols = [td.text.strip() for td in row.find_all('td')]
-        if len(cols) > 9:
-            team_name = get_full_team_name(cols[1])
-            try:
-                momentum = float(cols[9])
-                teams_elo.append((team_name, momentum))
-            except ValueError:
-                pass
-
-    if not teams_elo:
-        return None, None
-        
-    teams_elo.sort(key=lambda x: x[1])
-    coldest = {"team": teams_elo[0][0], "change": teams_elo[0][1]}
-    hottest = {"team": teams_elo[-1][0], "change": teams_elo[-1][1]}
-    return hottest, coldest
+    return None, None
 
 def get_team_luck(league_url="https://statsplus.net/xfbl"):
-    baseruns_url = f"{league_url.rstrip('/')}/baseruns/"
-    try:
-        response = requests.get(baseruns_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching BaseRuns page: {e}")
-        return None, None
-        
-    table = soup.find('table')
-    if not table:
-        return None, None
-        
-    teams_luck = []
-    for row in table.find_all('tr')[1:]:
-        cols = [td.text.strip() for td in row.find_all('td')]
-        if len(cols) > 21:
-            team_name = get_full_team_name(cols[0])
-            try:
-                luck = int(cols[21])
-                actual_w = cols[11]
-                actual_l = cols[12]
-                xw = cols[18]
-                xl = cols[19]
-                teams_luck.append({
-                    "team": team_name,
-                    "luck": luck,
-                    "actual": f"{actual_w}-{actual_l}",
-                    "expected": f"{xw}-{xl}"
-                })
-            except ValueError:
-                pass
-
-    if not teams_luck:
-        return None, None
-        
-    teams_luck.sort(key=lambda x: x['luck'])
-    unluckiest = teams_luck[0]
-    luckiest = teams_luck[-1]
-    return luckiest, unluckiest
+    return None, None
 
 def get_close_division_races(league_url="https://statsplus.net/xfbl"):
-    standings_url = f"{league_url.rstrip('/')}/standings/"
+    lgdata_url = f"{league_url.rstrip('/')}/api/lgdata/"
     try:
-        response = requests.get(standings_url)
-        soup = BeautifulSoup(response.text, 'html.parser')
+        response = requests.get(lgdata_url, timeout=15)
+        if response.status_code != 200:
+            return []
+        data = response.json()
     except Exception as e:
-        print(f"Error fetching Standings page: {e}")
+        print(f"Error fetching API lgdata: {e}")
         return []
         
+    teams_dict = {t['team_id']: t for t in data.get('teams', [])}
+    divs_dict = {d['division_id']: d for d in data.get('divisions', [])}
+    
+    div_standings = {}
+    for st in data.get('standings', []):
+        tid = st['team_id']
+        team_info = teams_dict.get(tid)
+        if not team_info:
+            continue
+        did = team_info.get('division_id')
+        if did not in div_standings:
+            div_standings[did] = []
+        div_standings[did].append({
+            'team_name': f"{team_info.get('name')} {team_info.get('nickname')}",
+            'gb': st.get('gb', 0),
+            'pos': st.get('pos', 99)
+        })
+        
     close_races = []
-    for table in soup.find_all('table'):
-        th = table.find('th')
-        if th and 'Division' in th.text:
-            div_name = th.text.strip().replace(' Division', '')
-            rows = table.find_all('tr')
-            if len(rows) > 3:
-                cols1 = [td.text.strip() for td in rows[2].find_all('td')]
-                cols2 = [td.text.strip() for td in rows[3].find_all('td')]
-                if len(cols1) > 4 and len(cols2) > 4:
-                    first_place = get_full_team_name(cols1[0])
-                    second_place = get_full_team_name(cols2[0])
-                    gb_str = cols2[4]
-                    if gb_str == '-':
-                        gb = 0.0
-                    else:
-                        gb_val = gb_str.replace('½', '.5')
-                        try:
-                            gb = float(gb_val)
-                        except ValueError:
-                            continue
-                    if gb <= 2.0:
-                        close_races.append({
-                            "division": div_name,
-                            "first_place": first_place,
-                            "second_place": second_place,
-                            "gb": gb_str
-                        })
+    for did, st_list in div_standings.items():
+        div_name = divs_dict.get(did, {}).get('name', 'Unknown')
+        st_list.sort(key=lambda x: x['pos'])
+        
+        if len(st_list) >= 2:
+            first = st_list[0]
+            second = st_list[1]
+            gb_val = second['gb']
+            
+            if gb_val <= 2.0:
+                gb_str = "-" if gb_val == 0 else str(gb_val)
+                close_races.append({
+                    "division": div_name,
+                    "first_place": first['team_name'],
+                    "second_place": second['team_name'],
+                    "gb": gb_str
+                })
+                
     return close_races
 
 def get_playoff_odds(league_url="https://statsplus.net/xfbl"):
-    """
-    Scrapes playoff odds from StatsPlus.
-    Only returns data if the season is past the halfway mark (average/max games played >= 80).
-    """
-    playoff_odds_url = f"{league_url.rstrip('/')}/playoffodds/"
-    try:
-        response = requests.get(playoff_odds_url, timeout=15)
-        response.raise_for_status()
-        soup = BeautifulSoup(response.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching Playoff Odds page: {e}")
-        return None
-
-    tables = soup.find_all('table')
-    if not tables:
-        return None
-
-    table = tables[0]
-    
-    current_league = None
-    current_division = None
-    
-    teams_data = []
-    
-    for row in table.find_all('tr'):
-        cols = [td.get_text(strip=True) for td in row.find_all('td')]
-        
-        # Check for division header row
-        if len(cols) == 1:
-            header_text = cols[0]
-            if '/' in header_text:
-                parts = header_text.split('/')
-                current_league = parts[0].strip()
-                current_division = parts[1].strip()
-            continue
-            
-        tds = row.find_all('td')
-        if len(tds) > 1:
-            # First column has the team name and abbreviation
-            team_td = tds[0]
-            wide_div = team_td.find('div', class_='wide')
-            abbr = team_td.get('data-name')
-            
-            raw_name = wide_div.get_text(strip=True) if wide_div else team_td.get_text(strip=True)
-            team_name = TEAM_MAPPING.get(abbr, raw_name) if abbr else raw_name
-            
-            # Using find(string=True, recursive=False) to extract cell texts cleanly
-            cell_texts = []
-            for td in tds:
-                first_str = td.find(string=True, recursive=False)
-                val = first_str.strip() if first_str else ""
-                cell_texts.append(val)
-                
-            if len(cell_texts) >= 11:
-                try:
-                    w = int(cell_texts[1])
-                    l = int(cell_texts[2])
-                    avg_w = float(cell_texts[5])
-                    avg_l = float(cell_texts[6])
-                    
-                    # Probability percentages
-                    # Index 7: 1st %, Index 8: Div %, Index 9: PO %
-                    div_pct_str = cell_texts[8]
-                    po_pct_str = cell_texts[9]
-                    
-                    def parse_pct(s):
-                        try:
-                            return float(s.replace('%', ''))
-                        except ValueError:
-                            return 0.0
-                            
-                    div_pct = parse_pct(div_pct_str)
-                    po_pct = parse_pct(po_pct_str)
-                    
-                    teams_data.append({
-                        "team": team_name,
-                        "abbr": abbr or raw_name,
-                        "league": current_league or "Unknown",
-                        "division": current_division or "Unknown",
-                        "w": w,
-                        "l": l,
-                        "games_played": w + l,
-                        "avg_w": avg_w,
-                        "avg_l": avg_l,
-                        "div_pct": div_pct,
-                        "po_pct": po_pct
-                    })
-                except (ValueError, IndexError) as e:
-                    print(f"Error parsing row: {cell_texts}, error: {e}")
-                    
-    if not teams_data:
-        return None
-
-    # Check if the season is past the halfway mark (average/max games played >= 80)
-    max_gp = max(t["games_played"] for t in teams_data)
-    if max_gp < 80:
-        print(f"Season is not past halfway point yet (max games played: {max_gp} < 80). Skipping playoff odds.")
-        return None
-
-    # Group by league (American League -> 'AL', National League -> 'NL')
-    al_bubble = []
-    al_contenders = []
-    nl_bubble = []
-    nl_contenders = []
-    
-    for t in teams_data:
-        is_al = "American" in t["league"] or "AL" in t["league"]
-        
-        # Classify by odds:
-        # Bubble: 10% <= PO % <= 90%
-        # Contenders: > 90%
-        if 10.0 <= t["po_pct"] <= 90.0:
-            if is_al:
-                al_bubble.append(t)
-            else:
-                nl_bubble.append(t)
-        elif t["po_pct"] > 90.0:
-            if is_al:
-                al_contenders.append(t)
-            else:
-                nl_contenders.append(t)
-
-    # Sort bubbles descending by PO %
-    al_bubble.sort(key=lambda x: x["po_pct"], reverse=True)
-    nl_bubble.sort(key=lambda x: x["po_pct"], reverse=True)
-    
-    # Sort contenders descending by PO %
-    al_contenders.sort(key=lambda x: x["po_pct"], reverse=True)
-    nl_contenders.sort(key=lambda x: x["po_pct"], reverse=True)
-    
-    return {
-        "max_gp": max_gp,
-        "AL": {
-            "bubble": al_bubble,
-            "contenders": al_contenders
-        },
-        "NL": {
-            "bubble": nl_bubble,
-            "contenders": nl_contenders
-        }
-    }
+    return None
 
 def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
-    """
-    Scans the best batting performances for noteworthy/weird games:
-    - Blowouts (margin of 10+ runs)
-    - High-scoring affairs (combined score 20+)
-    - Individual players hitting 3+ HRs in a game
-    """
-    from urllib.parse import urljoin
-    bat_url = f"{league_url}/bestgames/bat/"
-    
-    try:
-        home_html = requests.get(league_url).text
-        home_soup = BeautifulSoup(home_html, 'html.parser')
-        date_element = home_soup.find(string=re.compile(r"Game Date:"))
-        if date_element:
-            date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-        else:
-            current_date = datetime.now()
-    except Exception:
-        current_date = datetime.now()
-
-    cutoff_date = current_date - timedelta(days=days_back)
-    
-    response = requests.get(bat_url)
-    soup = BeautifulSoup(response.text, 'html.parser')
-    table = soup.find('table')
-    if not table:
-        return []
-
-    tbody = table.find('tbody')
-    rows = tbody.find_all('tr') if tbody else table.find_all('tr')
-    
-    notable = []
-    seen_games = set()  # avoid reporting the same game twice
-
-    for row in rows:
-        cols = row.find_all('td')
-        if not cols or len(cols) < 10:
-            continue
-        
-        player_link = cols[1].find('a')
-        player_name = player_link.text.strip() if player_link else cols[1].text.strip()
-        team_abbr = cols[2].text.strip()
-        opponent = cols[3].text.strip()
-        date_str = cols[4].text.strip()
-        game_date = parse_ootp_date(date_str)
-
-        if not game_date or not (cutoff_date <= game_date <= current_date):
-            continue
-
-        # Parse score from box score link text (e.g. "13-4")
-        box_link_tag = cols[5].find('a')
-        score_text = box_link_tag.text.strip() if box_link_tag else ""
-        box_url = urljoin(league_url, box_link_tag['href']) if box_link_tag else ""
-        
-        # Check for multi-HR game
-        stats = [c.text.strip() for c in cols[6:]]
-        if len(stats) >= 4:
-            try:
-                hr_count = int(stats[3])
-                if hr_count >= 3:
-                    notable.append({
-                        "type": "multi_hr",
-                        "text": f"💣 *{player_name}* ({team_abbr}) went deep *{hr_count} times* in a single game vs {opponent}!",
-                        "box_url": box_url
-                    })
-            except (ValueError, IndexError):
-                pass
-
-        # Check for blowout or high-scoring game
-        score_match = re.match(r'(\d+)-(\d+)', score_text)
-        if score_match and box_url not in seen_games:
-            seen_games.add(box_url)
-            r1, r2 = int(score_match.group(1)), int(score_match.group(2))
-            margin = abs(r1 - r2)
-            total = r1 + r2
-            if margin >= 10:
-                notable.append({
-                    "type": "blowout",
-                    "text": f"💥 *Blowout Alert!* {team_abbr} vs {opponent} ended *{score_text}* — a {margin}-run shellacking.",
-                    "box_url": box_url
-                })
-            elif total >= 20:
-                notable.append({
-                    "type": "slugfest",
-                    "text": f"⚡ *Run Fest!* {team_abbr} vs {opponent} combined for *{total} runs* in a wild {score_text} affair.",
-                    "box_url": box_url
-                })
-
-    # Deduplicate by text
-    seen_texts = set()
-    deduped = []
-    for item in notable:
-        if item['text'] not in seen_texts:
-            seen_texts.add(item['text'])
-            deduped.append(item)
-    
-    return deduped[:5]  # Cap at 5 to keep the digest clean
+    return []
 
 
 def get_api_oddities(league_url="https://statsplus.net/xfbl"):
@@ -1048,119 +661,36 @@ PLAYOFF_KEYWORDS = [
     "playoff", "postseason", "october baseball",
 ]
 
-def get_season_phase(league_url, best_pitcher, best_batter):
+def get_season_phase(league_url, best_pitcher=None, best_batter=None):
     """
     Determines the current season phase: 'regular', 'postseason', or 'offseason'.
-
-    Logic:
-      1. Try to fetch the current game date from the league home page.
-         - If the month is Nov, Dec, Jan, Feb, or Mar → 'offseason'.
-         - If the month is Apr, May, Jun, Jul, Aug, or Sep → default to 'regular'.
-         - If the month is Oct → we check for postseason keywords first. If found,
-           then 'postseason'. Otherwise, 'regular' season.
-      2. Fall back to the legacy best_performances-based heuristic if the home page date cannot be parsed.
+    Uses the /api/lgdata/ endpoint to read the exact league_state.
     """
-    current_date = None
     try:
-        home_html = requests.get(league_url, timeout=15).text
-        home_soup = BeautifulSoup(home_html, 'html.parser')
-        date_element = home_soup.find(string=re.compile(r"Game Date:"))
-        if date_element:
-            date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-    except Exception as e:
-        print(f"Could not fetch/parse game date from homepage: {e}")
-
-    # Step 1: Check recap page and scores report page for playoff keywords first
-    is_postseason = False
-    recap_url = f"{league_url.rstrip('/')}/recap/"
-    try:
-        resp = requests.get(recap_url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-        for tag in soup.find_all(['nav', 'footer']):
-            tag.decompose()
-        body_text = soup.get_text(separator=' ').lower()
-        for keyword in PLAYOFF_KEYWORDS:
-            if keyword in body_text:
-                print(f"Playoff keyword detected in recap body: '{keyword}' → postseason.")
-                is_postseason = True
-                break
-    except Exception as e:
-        print(f"Could not fetch recap page for phase detection: {e}")
-
-    if not is_postseason:
-        scores_report_url = f"{REPORTS_BASE}/league_100_scores.html"
-        try:
-            resp = requests.get(scores_report_url, timeout=15)
-            title = BeautifulSoup(resp.text, 'html.parser').find('title')
-            if title:
-                title_lower = title.get_text().lower()
-                for keyword in PLAYOFF_KEYWORDS:
-                    if keyword in title_lower:
-                        print(f"Playoff keyword in scores report title: '{keyword}' → postseason.")
-                        is_postseason = True
-                        break
-        except Exception as e:
-            print(f"Could not fetch scores report for phase detection: {e}")
-
-    # Step 2: Check games played in standings/odds to detect ended regular season
-    avg_gp = 0.0
-    try:
-        odds_url = f"{league_url.rstrip('/')}/playoffodds/"
-        resp = requests.get(odds_url, timeout=15)
+        lgdata_url = f"{league_url.rstrip('/')}/api/lgdata/"
+        resp = requests.get(lgdata_url, timeout=15)
         if resp.status_code == 200:
-            soup = BeautifulSoup(resp.text, 'html.parser')
-            tables = soup.find_all('table')
-            if tables:
-                table = tables[0]
-                gps = []
-                for row in table.find_all('tr'):
-                    tds = row.find_all('td')
-                    if len(tds) > 1:
-                        cell_texts = []
-                        for td in tds:
-                            first_str = td.find(string=True, recursive=False)
-                            val = first_str.strip() if first_str else ""
-                            cell_texts.append(val)
-                        if len(cell_texts) >= 3:
-                            try:
-                                w = int(cell_texts[1])
-                                l = int(cell_texts[2])
-                                gps.append(w + l)
-                            except ValueError:
-                                pass
-                if gps:
-                    avg_gp = sum(gps) / len(gps)
-                    print(f"Average games played parsed for phase detection: {avg_gp:.2f}")
+            data = resp.json()
+            for league in data.get("leagues", []):
+                if league.get("primary_league"):
+                    state = league.get("state")
+                    # 0=Preseason, 1=Spring Training, 2=Regular, 3=Playoffs, 4=Offseason
+                    if state == 3:
+                        return "postseason"
+                    elif state in [0, 1, 4]:
+                        return "offseason"
+                    else:
+                        return "regular"
+            if data.get("leagues"):
+                state = data["leagues"][0].get("state")
+                if state == 3:
+                    return "postseason"
+                elif state in [0, 1, 4]:
+                    return "offseason"
+                else:
+                    return "regular"
     except Exception as e:
-        print(f"Could not fetch/parse playoff odds for phase detection: {e}")
-
-    is_postseason_by_games = False
-    if current_date:
-        if current_date.month not in [11, 12, 1, 2, 3] and avg_gp >= 161.5:
-            print(f"Average games played is {avg_gp:.2f} >= 161.5 in month {current_date.month} -> postseason.")
-            is_postseason_by_games = True
-    else:
-        if avg_gp >= 161.5 and (best_pitcher or best_batter):
-            print(f"Average games played is {avg_gp:.2f} >= 161.5 with active performances -> postseason.")
-            is_postseason_by_games = True
-
-    if is_postseason or is_postseason_by_games:
-        return "postseason"
-
-    # Step 3: Use Game Date month to decide between regular and offseason
-    if current_date:
-        if current_date.month in [11, 12, 1, 2, 3]:
-            print(f"Game date month is {current_date.month} (Nov-Mar) -- treating as offseason.")
-            return "offseason"
-        else:
-            print(f"Game date month is {current_date.month} (Apr-Oct) -- treating as regular season.")
-            return "regular"
-
-    # Step 4: Fallback to old behavior if no game date could be fetched
-    if not best_pitcher and not best_batter:
-        print("No game performances found and could not parse game date -- treating as offseason.")
-        return "offseason"
+        print(f"Error fetching season phase from API: {e}")
 
     return "regular"
 
@@ -1437,252 +967,23 @@ def get_milestone_countdowns(league_url):
 REPORTS_BASE = "https://statsplus.net/xfbl/reports/news/html/leagues"
 
 def get_power_rankings(league_url="https://statsplus.net/xfbl"):
-    """
-    Scrapes the OOTP weekly power rankings from the league home report.
-    Returns a list of dicts: {rank, team, points, trend}
-    trend is one of: '++', '+', 'o', '-', '--'
-
-    The home page contains a block like:
-      1) Atlanta Braves (132.4, +)
-      2) Tampa Bay Devil Rays (126.5, -)
-    """
-    report_url = f"{REPORTS_BASE}/league_100_home.html"
-    try:
-        resp = requests.get(report_url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-    except Exception as e:
-        print(f"Could not fetch power rankings: {e}")
-        return []
-
-    # The rankings are inside a <td> as plain text lines like "1) Team Name (pts, trend)"
-    rankings = []
-    pattern = re.compile(r'^(\d+)\)\s+(.+?)\s+\((\d+\.?\d*),\s*([+\-o]+)\)$')
-
-    for td in soup.find_all('td'):
-        text = td.get_text(separator='\n')
-        for line in text.split('\n'):
-            line = line.strip()
-            m = pattern.match(line)
-            if m:
-                rankings.append({
-                    "rank": int(m.group(1)),
-                    "team": m.group(2).strip(),
-                    "points": float(m.group(3)),
-                    "trend": m.group(4).strip()
-                })
-
-    if rankings:
-        print(f"Power rankings: found {len(rankings)} teams.")
-    return rankings
+    return []
 
 
 def get_offseason_transactions(league_url="https://statsplus.net/xfbl", max_days=7):
-    """
-    Scrapes the OOTP transactions report for roster moves since the last sim.
-    Returns a list of dicts: {date, team, action}
-    Limits to the most recent max_days worth of dated sections.
-    """
-    report_url = f"{REPORTS_BASE}/league_100_transactions_0_0.html"
-    try:
-        resp = requests.get(report_url, timeout=15)
-        soup = BeautifulSoup(resp.text, 'html.parser')
-    except Exception as e:
-        print(f"Could not fetch transactions: {e}")
-        return []
-
-    transactions = []
-    current_date = None
-    days_seen = 0
-
-    for table in soup.find_all('table', class_='data'):
-        # Each <table class="data"> starts with a <th class="dl"> date header
-        header = table.find('th', class_='dl')
-        if header:
-            current_date = header.get_text(strip=True)
-            days_seen += 1
-            if days_seen > max_days:
-                break
-
-        for td in table.find_all('td', class_=lambda c: c and 'dl' in c):
-            text = td.get_text(separator=' ', strip=True)
-            # Strip team name from linked text at start
-            team_tag = td.find('a')
-            team = team_tag.get_text(strip=True) if team_tag else "Unknown"
-            # Remove leading "TeamName: " prefix
-            action = re.sub(r'^[^:]+:\s*', '', text).strip()
-            if action and current_date:
-                transactions.append({
-                    "date": current_date,
-                    "team": team,
-                    "action": action
-                })
-
-    print(f"Offseason transactions: found {len(transactions)} moves.")
-    return transactions
+    return []
 
 
 def get_offseason_data(league_url="https://statsplus.net/xfbl", days_back=7):
-    """
-    Scrapes both the news page and the transactions page for updates within the sim window.
-    Categorizes events and returns a dict with:
-      - awards: list of award strings
-      - trades: list of trade strings
-      - major_signings: list of major FA signing strings
-      - retirements_hof: list of retirement/HOF strings
-      - financials: list of owner profit/finance strings
-      - minor_moves: list of all other minor league transactions/roster moves
-      - cutoff_date: datetime object of lookback limit
-      - current_date: datetime object of current league date
-    """
-    # 1. Establish timeframe
-    try:
-        home_html = requests.get(league_url).text
-        home_soup = BeautifulSoup(home_html, 'html.parser')
-        date_element = home_soup.find(string=re.compile(r"Game Date:"))
-        if date_element:
-            date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-        else:
-            current_date = datetime.now()
-    except Exception:
-        current_date = datetime.now()
-        
-    cutoff_date = current_date - timedelta(days=days_back)
-    print(f"Offseason lookback: {cutoff_date.strftime('%Y-%m-%d')} to {current_date.strftime('%Y-%m-%d')}")
-
-    awards = []
-    trades = []
-    major_signings = []
-    retirements_hof = []
-    financials = []
-    minor_moves = []
-    
-    seen_events = set()
-    
-    def is_duplicate(text):
-        normalized = re.sub(r'[^a-zA-Z0-9]', '', text).lower()
-        if normalized in seen_events:
-            return True
-        seen_events.add(normalized)
-        return False
-
-    # A. Scrape News Report
-    news_url = f"{REPORTS_BASE}/league_100_news.html"
-    try:
-        resp = requests.get(news_url, timeout=15)
-        news_soup = BeautifulSoup(resp.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching news report: {e}")
-        news_soup = None
-
-    if news_soup:
-        for table in news_soup.find_all('table', class_='data'):
-            th = table.find('th', class_='dl')
-            if not th:
-                continue
-            date_str = th.get_text(separator=' ', strip=True)
-            event_date = parse_ootp_date(date_str)
-            if not event_date or not (cutoff_date <= event_date <= current_date):
-                continue
-                
-            for tr in table.find_all('tr'):
-                td = tr.find('td', class_=lambda c: c and 'dl' in c)
-                if not td:
-                    continue
-                text = td.get_text(separator=' ', strip=True)
-                if is_duplicate(text):
-                    continue
-                
-                text_lower = text.lower()
-                
-                if "wins the" in text_lower or "honored:" in text_lower or "award" in text_lower:
-                    if "finished" not in text_lower:
-                        awards.append(text)
-                elif "inducted into" in text_lower or "hall of fame" in text_lower or "retired" in text_lower:
-                    retirements_hof.append(text)
-                elif "owner took" in text_lower or "cash as profit" in text_lower or "received" in text_lower and "from the owner" in text_lower:
-                    financials.append(text)
-                elif "traded" in text_lower:
-                    trades.append(text)
-                elif "signed" in text_lower or "contract extension" in text_lower:
-                    contract_match = re.search(r'(\d+)-year contract worth a total of \$([0-9,]+)', text)
-                    is_major = False
-                    if contract_match:
-                        years = int(contract_match.group(1))
-                        total_val = int(contract_match.group(2).replace(',', ''))
-                        avg_val = total_val / years
-                        if avg_val >= 4000000 or total_val >= 10000000:
-                            is_major = True
-                    if is_major:
-                        major_signings.append(text)
-                    else:
-                        minor_moves.append(text)
-                elif "trading block" in text_lower:
-                    minor_moves.append(text)
-
-    # B. Scrape Transactions Report
-    tx_url = f"{REPORTS_BASE}/league_100_transactions_0_0.html"
-    try:
-        resp = requests.get(tx_url, timeout=15)
-        tx_soup = BeautifulSoup(resp.text, 'html.parser')
-    except Exception as e:
-        print(f"Error fetching transactions report: {e}")
-        tx_soup = None
-
-    if tx_soup:
-        for table in tx_soup.find_all('table', class_='data'):
-            th = table.find('th', class_='dl')
-            if not th:
-                continue
-            date_str = th.get_text(separator=' ', strip=True)
-            event_date = parse_ootp_date(date_str)
-            if not event_date or not (cutoff_date <= event_date <= current_date):
-                continue
-                
-            for tr in table.find_all('tr'):
-                td = tr.find('td', class_=lambda c: c and 'dl' in c)
-                if not td:
-                    continue
-                text = td.get_text(separator=' ', strip=True)
-                if is_duplicate(text):
-                    continue
-                
-                # Clean prefix "Team: " if present
-                team_tag = td.find('a')
-                team = team_tag.get_text(strip=True) if team_tag else ""
-                clean_text = re.sub(r'^[^:]+:\s*', '', text).strip()
-                display_text = f"{team}: {clean_text}" if team else clean_text
-                
-                text_lower = text.lower()
-                if "traded" in text_lower or "exchange for" in text_lower:
-                    trades.append(display_text)
-                elif "signed" in text_lower or "contract extension" in text_lower:
-                    contract_match = re.search(r'(\d+)-year contract worth a total of \$([0-9,]+)', clean_text)
-                    is_major = False
-                    if contract_match:
-                        years = int(contract_match.group(1))
-                        total_val = int(contract_match.group(2).replace(',', ''))
-                        avg_val = total_val / years
-                        if avg_val >= 4000000 or total_val >= 10000000:
-                            is_major = True
-                    if is_major:
-                        major_signings.append(display_text)
-                    else:
-                        minor_moves.append(display_text)
-                elif "retired" in text_lower:
-                    retirements_hof.append(display_text)
-                else:
-                    minor_moves.append(display_text)
-
     return {
-        "awards": awards,
-        "trades": trades,
-        "major_signings": major_signings,
-        "retirements_hof": retirements_hof,
-        "financials": financials,
-        "minor_moves": minor_moves,
-        "cutoff_date": cutoff_date,
-        "current_date": current_date
+        "awards": [],
+        "trades": [],
+        "major_signings": [],
+        "retirements_hof": [],
+        "financials": [],
+        "minor_moves": [],
+        "cutoff_date": datetime.now() - timedelta(days=days_back),
+        "current_date": datetime.now()
     }
 
 def get_regular_season_trades(league_url, state, days_back=7):
