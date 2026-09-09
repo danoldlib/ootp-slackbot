@@ -975,6 +975,19 @@ def get_offseason_transactions(league_url="https://statsplus.net/xfbl", max_days
 
 
 def get_offseason_data(league_url="https://statsplus.net/xfbl", days_back=7):
+    try:
+        date_url = f"{league_url.rstrip('/')}/api/date/"
+        resp = requests.get(date_url, timeout=15)
+        if resp.status_code == 200:
+            date_str = resp.text.strip()
+            current_date = datetime.strptime(date_str, "%Y-%m-%d")
+        else:
+            current_date = datetime.now()
+    except Exception:
+        current_date = datetime.now()
+        
+    cutoff_date = current_date - timedelta(days=days_back)
+    
     return {
         "awards": [],
         "trades": [],
@@ -982,8 +995,8 @@ def get_offseason_data(league_url="https://statsplus.net/xfbl", days_back=7):
         "retirements_hof": [],
         "financials": [],
         "minor_moves": [],
-        "cutoff_date": datetime.now() - timedelta(days=days_back),
-        "current_date": datetime.now()
+        "cutoff_date": cutoff_date,
+        "current_date": current_date
     }
 
 def get_regular_season_trades(league_url, state, days_back=7):
