@@ -9,14 +9,29 @@ def fetch_statsplus_data(league_url, api_token):
     response.raise_for_status()
     data = response.json()
     
-    # We want to map team_id to team name
-    teams_dict = {t['team_id']: f"{t.get('name', '')} {t.get('nickname', '')}".strip() for t in data.get('teams', [])}
+    # Find the primary league ID (usually 100)
+    primary_league_id = None
+    for league in data.get('leagues', []):
+        if league.get('primary_league'):
+            primary_league_id = league.get('id') or league.get('league_id')
+            break
+            
+    # We want to map team_id to team name, but ONLY for the primary league
+    teams_dict = {}
+    for t in data.get('teams', []):
+        t_league_id = t.get('league_id') or t.get('id') # API sometimes varies
+        if primary_league_id and t_league_id != primary_league_id:
+            continue
+        teams_dict[t.get('team_id') or t.get('id')] = f"{t.get('name', '')} {t.get('nickname', '')}".strip()
     
     # Get standings data
     standings = []
     for st in data.get('standings', []):
         tid = st.get('team_id')
-        team_name = teams_dict.get(tid, f"Team {tid}")
+        if tid not in teams_dict:
+            continue # Skip minor league teams
+            
+        team_name = teams_dict[tid]
         wins = st.get('w', 0)
         losses = st.get('l', 0)
         rs = st.get('rs', 0) # Runs scored
@@ -61,9 +76,17 @@ Based on this data, make an IN-DEPTH set of power rankings for the entire league
 Rank every team, and give each one a 1-100 score for:
 - Overall Team
 - Hitting
-- Pitching/Defense
-Then give each team their biggest strength and biggest weakness based on their record and run differential. Write about two to three sentences each.
-Then based off your rankings, create a list ranking each team from best to worst, giving them an overall summary and classify them into if they are: tanking, growing, contending, falling off, or stuck in purgatory.
+- Defense
+- Starting Pitching
+- Bullpen
+- Cap Management
+
+Then give each team their biggest strength and biggest weakness. Write about two to three sentences each.
+
+Then based off your rankings, create a new list ranking each team from best to worst and go more depth on each team's season. Give them an overall summary and classify them into if they are: tanking, growing, contending, falling off or are just stuck in purgatory. Then expand further on those strengths and weaknesses you listed before.
+
+Lastly, put together your own awards predictions for the AL and NL!
+
 Format the output nicely in Slack Markdown (use asterisks for bold, etc). Do not use HTML tags. Keep the tone fun, engaging, and analytical!
 """
 
