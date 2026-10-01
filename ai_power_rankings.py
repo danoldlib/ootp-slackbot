@@ -70,7 +70,7 @@ Format the output nicely in Slack Markdown (use asterisks for bold, etc). Do not
     try:
         client = genai.Client(api_key=gemini_key)
         response = client.models.generate_content(
-            model='gemini-2.5-flash',
+            model='gemini-3.8-flash',
             contents=prompt,
         )
         return response.text
