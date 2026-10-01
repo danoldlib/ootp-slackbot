@@ -18,6 +18,7 @@ from scraper import (
     get_regular_season_trades, evaluate_traded_players, get_injuries,
     get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings
 )
+from ai_power_rankings import generate_power_rankings as generate_ai_power_rankings
 
 # Load environment variables
 load_dotenv()
@@ -855,6 +856,30 @@ def trigger_daily_digest():
 
     print(f"Posting Daily Digest to Slack ({len(all_blocks)} blocks)...")
     post_daily_digest(all_blocks)
+
+@app.command("/power-rankings")
+def handle_power_rankings(ack, respond, command):
+    ack()
+    respond(text="Generating Power Rankings... this might take a minute! 🤖⚾")
+    
+    def generate_and_post():
+        try:
+            rankings = generate_ai_power_rankings(LEAGUE_URL)
+            # Slack limits respond() after 30 mins, but this should be quick enough.
+            # We'll use the WebClient to post the large response directly to the channel
+            # to make sure it's visible to everyone, not just the user who requested it.
+            client = WebClient(token=SLACK_BOT_TOKEN)
+            client.chat_postMessage(
+                channel=command['channel_id'],
+                text=rankings,
+                mrkdwn=True
+            )
+        except Exception as e:
+            print(f"Error generating AI power rankings: {e}")
+            respond(text=f"Sorry, an error occurred: {e}")
+            
+    thread = threading.Thread(target=generate_and_post)
+    thread.start()
 
 @app.message(re.compile(r"League File.*has been updated", re.IGNORECASE))
 def handle_sim_complete(message, say):
