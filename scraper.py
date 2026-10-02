@@ -677,7 +677,9 @@ def get_season_phase(league_url, best_pitcher=None, best_batter=None):
                     # 0=Preseason, 1=Spring Training, 2=Regular, 3=Playoffs, 4=Offseason
                     if state == 3:
                         return "postseason"
-                    elif state in [0, 1, 4]:
+                    elif state in [0, 1]:
+                        return "spring_training"
+                    elif state == 4:
                         return "offseason"
                     else:
                         return "regular"
@@ -685,7 +687,9 @@ def get_season_phase(league_url, best_pitcher=None, best_batter=None):
                 state = data["leagues"][0].get("state")
                 if state == 3:
                     return "postseason"
-                elif state in [0, 1, 4]:
+                elif state in [0, 1]:
+                    return "spring_training"
+                elif state == 4:
                     return "offseason"
                 else:
                     return "regular"

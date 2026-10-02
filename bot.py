@@ -561,18 +561,28 @@ def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
     return blocks
 
 
-def build_offseason_blocks(offseason_data):
+def build_offseason_blocks(offseason_data, is_spring_training=False):
     """
     Builds a detailed offseason digest from categorized offseason data.
     """
     import random
-    flavor_lines = [
-        "The hot stove is heating up. GMs are wheeling and dealing.",
-        "No games today — just front office moves, contract talks, and roster shuffling.",
-        "Players are working out, agents are calling, and rosters are taking shape.",
-        "It's quiet on the diamond, but busy in the front office.",
-        "The offseason grind continues. Every move matters for next year.",
-    ]
+    if is_spring_training:
+        flavor_lines = [
+            "Hope springs eternal! Players are stretching their legs and pitchers are getting their work in.",
+            "The crack of the bat is back! Spring Training games are in full swing.",
+            "Position battles are heating up under the warm spring sun.",
+            "Veterans are knocking off the rust while prospects try to make a name for themselves."
+        ]
+        header_text = "🌴 XFBL Spring Training Update"
+    else:
+        flavor_lines = [
+            "The hot stove is heating up. GMs are wheeling and dealing.",
+            "No games today — just front office moves, contract talks, and roster shuffling.",
+            "Players are working out, agents are calling, and rosters are taking shape.",
+            "It's quiet on the diamond, but busy in the front office.",
+            "The offseason grind continues. Every move matters for next year.",
+        ]
+        header_text = "💤 XFBL Offseason Sim Complete"
     
     cutoff_date = offseason_data.get("cutoff_date")
     current_date = offseason_data.get("current_date")
@@ -582,7 +592,7 @@ def build_offseason_blocks(offseason_data):
             "type": "header",
             "text": {
                 "type": "plain_text",
-                "text": "💤 XFBL Offseason Sim Complete",
+                "text": header_text,
                 "emoji": True
             }
         },
@@ -716,7 +726,16 @@ def trigger_daily_digest():
         print("Offseason sim detected — posting detailed update, skipping rotation state.")
         print("Fetching offseason transactions & news...")
         offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
-        all_blocks = build_offseason_blocks(offseason_data)
+        all_blocks = build_offseason_blocks(offseason_data, is_spring_training=False)
+        post_daily_digest(all_blocks)
+        return
+
+    # ── SPRING TRAINING ───────────────────────────────────────────────────────
+    if season_phase == "spring_training":
+        print("Spring Training sim detected — posting spring update.")
+        print("Fetching transactions & news...")
+        offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        all_blocks = build_offseason_blocks(offseason_data, is_spring_training=True)
         post_daily_digest(all_blocks)
         return
 
