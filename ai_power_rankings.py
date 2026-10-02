@@ -129,7 +129,7 @@ def fetch_statsplus_data(league_url, api_token):
             "top_pitchers": pitchers_str
         })
         
-    return standings
+    return standings, is_preseason
 
 def generate_power_rankings(league_url="https://statsplus.net/xfbl"):
     """Fetches data and asks Gemini to generate power rankings."""
@@ -142,7 +142,7 @@ def generate_power_rankings(league_url="https://statsplus.net/xfbl"):
         return "⚠️ Error: `GEMINI_API_KEY` not set in `.env`."
         
     try:
-        standings = fetch_statsplus_data(league_url, api_token)
+        standings, is_preseason = fetch_statsplus_data(league_url, api_token)
     except Exception as e:
         return f"⚠️ Error fetching data from StatsPlus API: {e}"
         
