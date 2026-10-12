@@ -1,7 +1,12 @@
 import requests
 from bs4 import BeautifulSoup
 import re
+import os
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
+
+load_dotenv()
+
 
 def parse_ootp_date(date_str):
     """
@@ -34,40 +39,359 @@ def get_statsplus_session():
         pass
     return session
 
-def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
+def refresh_statsplus_api_token(league_url="https://statsplus.net/xfbl"):
     """
-    Scrapes the Best Performances pages from StatsPlus.
-    Finds the highest ranked performance within the designated timeframe.
+    Checks and refreshes the StatsPlus API token via the /api/tokenrefresh/ endpoint.
+    If a new token is issued, updates the local .env file and os.environ.
+    Returns a dict with:
+      - 'status': 'valid' | 'refreshed' | 'expired' | 'error'
+      - 'message': human-readable description
+      - 'token': active token string
     """
-    bat_url = f"{league_url}/bestgames/bat/"
-    pitch_url = f"{league_url}/bestgames/pitch/"
-    session = get_statsplus_session()
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    if not token:
+        return {
+            "status": "error",
+            "message": "STATSPLUS_API_TOKEN is not set in environment.",
+            "token": ""
+        }
+
+    url = f"{league_url.rstrip('/')}/api/tokenrefresh/"
+    headers = {"Authorization": f"Bearer {token}"}
+    try:
+        resp = requests.post(url, headers=headers, timeout=20)
+        if resp.status_code == 200:
+            data = resp.json()
+            new_token = data.get("token")
+            expires = data.get("expires", "")
+            rotated = data.get("rotated", False)
+
+            if rotated and new_token and new_token != token:
+                # Update os.environ
+                os.environ["STATSPLUS_API_TOKEN"] = new_token
+                # Update .env file
+                env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+                if os.path.exists(env_path):
+                    with open(env_path, "r", encoding="utf-8") as f:
+                        lines = f.readlines()
+                    updated = False
+                    for idx, line in enumerate(lines):
+                        if line.startswith("STATSPLUS_API_TOKEN="):
+                            lines[idx] = f"STATSPLUS_API_TOKEN={new_token}\n"
+                            updated = True
+                            break
+                    if not updated:
+                        lines.append(f"\nSTATSPLUS_API_TOKEN={new_token}\n")
+                    with open(env_path, "w", encoding="utf-8") as f:
+                        f.writelines(lines)
+                print(f"StatsPlus API token automatically rotated! Expires: {expires}")
+                return {
+                    "status": "refreshed",
+                    "message": f"Token automatically rotated. New expiration: {expires}",
+                    "token": new_token
+                }
+            return {
+                "status": "valid",
+                "message": f"Token is active and healthy (expires: {expires}).",
+                "token": token
+            }
+        elif resp.status_code in (400, 401):
+            return {
+                "status": "expired",
+                "message": resp.text.strip() or "API token has expired.",
+                "token": token
+            }
+        else:
+            return {
+                "status": "error",
+                "message": f"Unexpected status {resp.status_code}: {resp.text[:100]}",
+                "token": token
+            }
+    except Exception as e:
+        return {
+            "status": "error",
+            "message": f"Network error during token refresh: {e}",
+            "token": token
+        }
+
+def get_league_current_date(league_url="https://statsplus.net/xfbl"):
+
+    """
+    Fetches the exact in-game date from the /api/date/ endpoint.
+    Falls back to scraping the homepage if unavailable.
+    """
+    import os
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_param = f"?token={token}" if token else ""
+    try:
+        resp = requests.get(f"{league_url.rstrip('/')}/api/date/{token_param}", timeout=10)
+        if resp.status_code == 200 and resp.text.strip():
+            date_str = resp.text.strip()
+            # e.g. '2009-04-13'
+            return datetime.strptime(date_str, "%Y-%m-%d")
+    except Exception as e:
+        print(f"Error fetching date from API: {e}")
 
     try:
+        session = get_statsplus_session()
         home_html = session.get(league_url, timeout=10).text
         home_soup = BeautifulSoup(home_html, 'html.parser')
         date_element = home_soup.find(string=re.compile(r"Game Date:"))
         if date_element:
             date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-        else:
-            current_date = datetime.now()
+            return datetime.strptime(date_str, "%Y-%m-%d")
     except Exception:
-        current_date = datetime.now()
+        pass
 
+    return datetime.now()
+
+def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
+    """
+    Fetches the highest ranked pitcher and batter performances within the sim window.
+    Prefers using the StatsPlus API (/api/atbats/, /api/players/, /api/lgdata/) to avoid
+    triggering 429 rate limits on HTML scraping. Falls back to HTML scraping if API data is unavailable.
+    """
+    current_date = get_league_current_date(league_url)
     cutoff_date = current_date - timedelta(days=days_back)
     print(f"Looking for performances between {cutoff_date.strftime('%Y-%m-%d')} and {current_date.strftime('%Y-%m-%d')}")
+
+    # 1. Attempt API calculation first
+    try:
+        best_p, best_b = get_best_performances_from_api(league_url, cutoff_date, current_date)
+        if best_p or best_b:
+            return best_p, best_b
+    except Exception as e:
+        print(f"API performance calculation error: {e}")
+
+    # 2. Fallback to HTML scraping
+    bat_url = f"{league_url}/bestgames/bat/"
+    pitch_url = f"{league_url}/bestgames/pitch/"
+    session = get_statsplus_session()
 
     best_batter = scrape_table_with_dates(bat_url, cutoff_date, current_date, league_url, is_pitcher=False, session=session)
     best_pitcher = scrape_table_with_dates(pitch_url, cutoff_date, current_date, league_url, is_pitcher=True, session=session)
 
     return best_pitcher, best_batter
 
+def get_best_performances_from_api(league_url, cutoff_date, current_date):
+    """
+    Calculates top batter and pitcher performances directly from /api/atbats/ and /api/lgdata/.
+    """
+    import csv
+    import io
+    import os
+    from collections import defaultdict
+
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_param = f"?token={token}" if token else ""
+
+    # Fetch teams mapping from /api/lgdata/
+    team_abbr_map = {}
+    try:
+        lg_resp = requests.get(f"{league_url.rstrip('/')}/api/lgdata/{token_param}", timeout=15)
+        if lg_resp.status_code == 200:
+            for t in lg_resp.json().get('teams', []):
+                team_abbr_map[str(t.get('team_id'))] = t.get('abbr', '')
+    except Exception as e:
+        print(f"Failed to fetch lgdata teams: {e}")
+
+    # Fetch player names mapping from /api/players/
+    player_names = {}
+    try:
+        p_resp = requests.get(f"{league_url.rstrip('/')}/api/players/{token_param}", timeout=15)
+        if p_resp.status_code == 200:
+            p_reader = csv.DictReader(io.StringIO(p_resp.text))
+            for pr in p_reader:
+                pid = pr.get('ID', '').strip()
+                if pid:
+                    first = pr.get('First Name', '').strip()
+                    last = pr.get('Last Name', '').strip()
+                    player_names[pid] = f"{first} {last}".strip()
+    except Exception as e:
+        print(f"Failed to fetch player names: {e}")
+
+    # Fetch atbats data
+    start_str = cutoff_date.strftime('%Y-%m-%d')
+    end_str = current_date.strftime('%Y-%m-%d')
+    atbats_url = f"{league_url.rstrip('/')}/api/atbats/{token_param}{'&' if token_param else '?'}start={start_str}&end={end_str}"
+    
+    ab_resp = requests.get(atbats_url, timeout=25)
+    if ab_resp.status_code != 200 or 'Request too soon' in ab_resp.text or 'id,player_id' not in ab_resp.text:
+        # If rate-limited or unavailable, return None so scraper can fall back
+        return None, None
+
+    rows = list(csv.DictReader(io.StringIO(ab_resp.text)))
+    if not rows:
+        return None, None
+
+    # Track games and teams
+    game_teams = defaultdict(set)
+    for r in rows:
+        gid = r.get('game_id')
+        tid = r.get('team_id')
+        if gid and tid:
+            game_teams[gid].add(tid)
+
+    # 1. Evaluate Batters
+    batter_games = defaultdict(lambda: {'ab': 0, 'h': 0, 'd': 0, 't': 0, 'hr': 0, 'rbi': 0, 'r': 0, 'bb': 0, 'k': 0, 'date': '', 'team_id': '', 'game_id': ''})
+    for r in rows:
+        if r.get('game_type') != '0':  # Regular season games only
+            continue
+        gdate_str = r.get('date', '')
+        try:
+            gdate = datetime.strptime(gdate_str, "%Y-%m-%d")
+            if not (cutoff_date <= gdate <= current_date):
+                continue
+        except Exception:
+            continue
+
+        pid = r.get('player_id')
+        gid = r.get('game_id')
+        key = (pid, gid)
+        bg = batter_games[key]
+        bg['date'] = gdate_str
+        bg['team_id'] = r.get('team_id')
+        bg['game_id'] = gid
+        bg['rbi'] += int(r.get('rbi') or 0)
+        bg['r'] += int(r.get('r') or 0)
+        res = r.get('result')
+        if res in ('4', '5', '6', '7', '8', '9', '1'):
+            bg['ab'] += 1
+        if res in ('6', '7', '8', '9'):
+            bg['h'] += 1
+        if res == '7':
+            bg['d'] += 1
+        if res == '8':
+            bg['t'] += 1
+        if res == '9':
+            bg['hr'] += 1
+        if res == '2':
+            bg['bb'] += 1
+        if res == '1':
+            bg['k'] += 1
+
+    best_batter_obj = None
+    if batter_games:
+        scored_batters = []
+        for (pid, gid), st in batter_games.items():
+            tb = (st['h'] - st['d'] - st['t'] - st['hr']) + (st['d'] * 2) + (st['t'] * 3) + (st['hr'] * 4)
+            score = tb * 2 + st['rbi'] * 1.5 + st['r'] * 1.0 + st['bb'] * 0.75
+            scored_batters.append((score, pid, gid, st, tb))
+        
+        scored_batters.sort(reverse=True, key=lambda x: x[0])
+        score, b_pid, b_gid, b_st, b_tb = scored_batters[0]
+        
+        opp_set = game_teams.get(b_gid, set()) - {b_st['team_id']}
+        opp_abbr = team_abbr_map.get(list(opp_set)[0], '???') if opp_set else '???'
+        team_abbr = team_abbr_map.get(str(b_st['team_id']), '???')
+        pname = player_names.get(b_pid, f"Player {b_pid}")
+        box_url = f"{league_url.rstrip('/')}/reports/news/html/box_scores/game_box_{b_gid}.html"
+
+        # stats mapping matching Slack block builder: 0:AB, 1:H, 2:RBI, 3:HR, 4:R, 5:BB, 6:GS
+        b_stats = [str(b_st['ab']), str(b_st['h']), str(b_st['rbi']), str(b_st['hr']), str(b_st['r']), str(b_st['bb']), f"{score:.1f}"]
+        b_stat_line = f"AB: {b_st['ab']} | R: {b_st['r']} | H: {b_st['h']} | HR: {b_st['hr']} | RBI: {b_st['rbi']} | BB: {b_st['bb']} | GS: {score:.1f}"
+
+        best_batter_obj = {
+            "name": pname,
+            "team": team_abbr,
+            "opponent": opp_abbr,
+            "player_id": b_pid,
+            "date": b_st['date'],
+            "stat_line": b_stat_line,
+            "stats": b_stats,
+            "metric": f"{score:.1f} Batting Score",
+            "is_pitcher": False,
+            "box_url": box_url
+        }
+
+    # 2. Evaluate Pitchers
+    pitcher_games = defaultdict(lambda: {'bf': 0, 'h': 0, 'd': 0, 't': 0, 'hr': 0, 'rbi': 0, 'r': 0, 'bb': 0, 'k': 0, 'outs': 0, 'date': '', 'team_id': '', 'game_id': '', 'opp_id': ''})
+    for r in rows:
+        if r.get('game_type') != '0':
+            continue
+        gdate_str = r.get('date', '')
+        try:
+            gdate = datetime.strptime(gdate_str, "%Y-%m-%d")
+            if not (cutoff_date <= gdate <= current_date):
+                continue
+        except Exception:
+            continue
+
+        pid = r.get('pitcher_id')
+        gid = r.get('game_id')
+        opp_tid = r.get('team_id')
+        key = (pid, gid)
+        pg = pitcher_games[key]
+        pg['date'] = gdate_str
+        pg['game_id'] = gid
+        pg['opp_id'] = opp_tid
+        pg['bf'] += 1
+        pg['r'] += int(r.get('r') or 0)
+        res = r.get('result')
+        if res in ('4', '5', '1'):
+            pg['outs'] += 1
+        if res in ('6', '7', '8', '9'):
+            pg['h'] += 1
+        if res == '7':
+            pg['d'] += 1
+        if res == '8':
+            pg['t'] += 1
+        if res == '9':
+            pg['hr'] += 1
+        if res == '2':
+            pg['bb'] += 1
+        if res == '1':
+            pg['k'] += 1
+
+    best_pitcher_obj = None
+    if pitcher_games:
+        scored_pitchers = []
+        for (pid, gid), st in pitcher_games.items():
+            outs = st['outs']
+            ip_full = outs // 3
+            ip_rem = outs % 3
+            ip_str = f"{ip_full}.{ip_rem}"
+            bonus = max(0, (ip_full - 4) * 2)
+            gs = 50 + outs + bonus + st['k'] - (2 * st['h']) - (4 * st['r']) - (2 * st['bb'])
+            scored_pitchers.append((gs, pid, gid, st, ip_str))
+
+        scored_pitchers.sort(reverse=True, key=lambda x: x[0])
+        gs_score, p_pid, p_gid, p_st, p_ip_str = scored_pitchers[0]
+
+        opp_abbr = team_abbr_map.get(str(p_st['opp_id']), '???')
+        p_team_set = game_teams.get(p_gid, set()) - {p_st['opp_id']}
+        team_abbr = team_abbr_map.get(list(p_team_set)[0], '???') if p_team_set else '???'
+        pname = player_names.get(p_pid, f"Player {p_pid}")
+        box_url = f"{league_url.rstrip('/')}/reports/news/html/box_scores/game_box_{p_gid}.html"
+
+        # stats mapping: 0:IP, 1:R, 2:H, 3:HR, 4:BB, 5:K, 6:GS
+        p_stats = [p_ip_str, str(p_st['r']), str(p_st['h']), str(p_st['hr']), str(p_st['bb']), str(p_st['k']), str(gs_score)]
+        p_stat_line = f"IP: {p_ip_str} | H: {p_st['h']} | K: {p_st['k']} | BB: {p_st['bb']} | HR: {p_st['hr']} | GS: {gs_score}"
+
+        best_pitcher_obj = {
+            "name": pname,
+            "team": team_abbr,
+            "opponent": opp_abbr,
+            "player_id": p_pid,
+            "date": p_st['date'],
+            "stat_line": p_stat_line,
+            "stats": p_stats,
+            "metric": f"{gs_score} Game Score",
+            "is_pitcher": True,
+            "box_url": box_url
+        }
+
+    return best_pitcher_obj, best_batter_obj
+
 def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitcher=False, session=None):
     if session is None:
         session = get_statsplus_session()
-    response = session.get(url, timeout=15)
-    soup = BeautifulSoup(response.text, 'html.parser')
+    try:
+        response = session.get(url, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+    except Exception as e:
+        print(f"Error scraping {url}: {e}")
+        return None
     
     table = soup.find('table')
     if not table:
@@ -135,6 +459,7 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
 
     print(f"Could not find a performance in the timeframe among the listed games.")
     return None
+
 
 def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl"):
     recap_url = f"{league_url.rstrip('/')}/recap/"
@@ -329,29 +654,134 @@ def get_playoff_odds(league_url="https://statsplus.net/xfbl"):
 
 def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
     """
-    Scans the best batting performances for noteworthy/weird games:
+    Scans for noteworthy/weird games:
     - Blowouts (margin of 10+ runs)
     - High-scoring affairs (combined score 20+)
     - Individual players hitting 3+ HRs in a game
+    Uses the atbats API data first, falling back to HTML scraping.
     """
     from urllib.parse import urljoin
+    import os
+    import csv
+    import io
+    from collections import defaultdict
+
+    current_date = get_league_current_date(league_url)
+    cutoff_date = current_date - timedelta(days=days_back)
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_param = f"?token={token}" if token else ""
+
+    # Attempt API calculation first
+    try:
+        start_str = cutoff_date.strftime('%Y-%m-%d')
+        end_str = current_date.strftime('%Y-%m-%d')
+        atbats_url = f"{league_url.rstrip('/')}/api/atbats/{token_param}{'&' if token_param else '?'}start={start_str}&end={end_str}"
+        ab_resp = requests.get(atbats_url, timeout=20)
+        
+        if ab_resp.status_code == 200 and 'id,player_id' in ab_resp.text:
+            rows = list(csv.DictReader(io.StringIO(ab_resp.text)))
+            
+            # Fetch teams mapping
+            team_abbr_map = {}
+            lg_resp = requests.get(f"{league_url.rstrip('/')}/api/lgdata/{token_param}", timeout=10)
+            if lg_resp.status_code == 200:
+                for t in lg_resp.json().get('teams', []):
+                    team_abbr_map[str(t.get('team_id'))] = t.get('abbr', '')
+
+            # Fetch player names mapping
+            player_names = {}
+            p_resp = requests.get(f"{league_url.rstrip('/')}/api/players/{token_param}", timeout=10)
+            if p_resp.status_code == 200:
+                p_reader = csv.DictReader(io.StringIO(p_resp.text))
+                for pr in p_reader:
+                    pid = pr.get('ID', '').strip()
+                    if pid:
+                        first = pr.get('First Name', '').strip()
+                        last = pr.get('Last Name', '').strip()
+                        player_names[pid] = f"{first} {last}".strip()
+
+            notable = []
+            seen_games = set()
+
+            # Group by game and calculate team runs and player HRs
+            game_runs = defaultdict(lambda: defaultdict(int))
+            player_game_hrs = defaultdict(int)
+            game_dates = {}
+
+            for r in rows:
+                if r.get('game_type') != '0':
+                    continue
+                gdate_str = r.get('date', '')
+                try:
+                    gdate = datetime.strptime(gdate_str, "%Y-%m-%d")
+                    if not (cutoff_date <= gdate <= current_date):
+                        continue
+                except Exception:
+                    continue
+
+                gid = r.get('game_id')
+                tid = r.get('team_id')
+                pid = r.get('player_id')
+                game_dates[gid] = gdate_str
+                game_runs[gid][tid] += int(r.get('r') or 0)
+
+                if r.get('result') == '9':  # Home run
+                    player_game_hrs[(pid, gid, tid)] += 1
+
+            # Check for 3+ HR games
+            for (pid, gid, tid), hr_count in player_game_hrs.items():
+                if hr_count >= 3:
+                    pname = player_names.get(pid, f"Player {pid}")
+                    tabbr = team_abbr_map.get(tid, '???')
+                    other_teams = [team_abbr_map.get(t, '???') for t in game_runs[gid].keys() if t != tid]
+                    opp = other_teams[0] if other_teams else '???'
+                    box_url = f"{league_url.rstrip('/')}/reports/news/html/box_scores/game_box_{gid}.html"
+                    notable.append({
+                        "type": "multi_hr",
+                        "text": f"💣 *{pname}* ({tabbr}) went deep *{hr_count} times* in a single game vs {opp}!",
+                        "box_url": box_url
+                    })
+
+            # Check for blowouts and slugfests
+            for gid, runs_by_team in game_runs.items():
+                if len(runs_by_team) == 2 and gid not in seen_games:
+                    seen_games.add(gid)
+                    t_list = list(runs_by_team.keys())
+                    t1, t2 = t_list[0], t_list[1]
+                    r1, r2 = runs_by_team[t1], runs_by_team[t2]
+                    abbr1 = team_abbr_map.get(t1, '???')
+                    abbr2 = team_abbr_map.get(t2, '???')
+                    margin = abs(r1 - r2)
+                    total = r1 + r2
+                    box_url = f"{league_url.rstrip('/')}/reports/news/html/box_scores/game_box_{gid}.html"
+
+                    if margin >= 10:
+                        notable.append({
+                            "type": "blowout",
+                            "text": f"💥 *Blowout Alert!* {abbr1} vs {abbr2} ended *{r1}-{r2}* — a {margin}-run shellacking.",
+                            "box_url": box_url
+                        })
+                    elif total >= 20:
+                        notable.append({
+                            "type": "slugfest",
+                            "text": f"⚡ *Run Fest!* {abbr1} vs {abbr2} combined for *{total} runs* in a wild {r1}-{r2} affair.",
+                            "box_url": box_url
+                        })
+
+            if notable:
+                seen_texts = set()
+                deduped = []
+                for item in notable:
+                    if item['text'] not in seen_texts:
+                        seen_texts.add(item['text'])
+                        deduped.append(item)
+                return deduped[:5]
+    except Exception as e:
+        print(f"API notable games calculation error: {e}")
+
+    # Fallback to HTML scraping
     bat_url = f"{league_url}/bestgames/bat/"
     session = get_statsplus_session()
-
-    try:
-        home_html = session.get(league_url, timeout=10).text
-        home_soup = BeautifulSoup(home_html, 'html.parser')
-        date_element = home_soup.find(string=re.compile(r"Game Date:"))
-        if date_element:
-            date_str = date_element.replace("Game Date:", "").strip()
-            current_date = datetime.strptime(date_str, "%Y-%m-%d")
-        else:
-            current_date = datetime.now()
-    except Exception:
-        current_date = datetime.now()
-
-    cutoff_date = current_date - timedelta(days=days_back)
-
     try:
         response = session.get(bat_url, timeout=15)
         soup = BeautifulSoup(response.text, 'html.parser')

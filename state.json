@@ -134,5 +134,20 @@
       "player": "Brett Myers",
       "value": 1.72
     }
+  },
+  "analytics_mode": 1,
+  "last_oddity_categories": [
+    "blown_save_king",
+    "pitch_war_leader",
+    "caught_stealing",
+    "iron_man",
+    "mr_reliable"
+  ],
+  "last_oddity_winners": {
+    "blown_save_king": "20068",
+    "pitch_war_leader": "42225",
+    "caught_stealing": "39060",
+    "iron_man": "42493",
+    "mr_reliable": "13721"
   }
 }

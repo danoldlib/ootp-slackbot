@@ -16,7 +16,8 @@ from scraper import (
     get_season_phase, get_power_rankings, get_offseason_transactions,
     get_offseason_data, get_playoff_odds,
     get_regular_season_trades, evaluate_traded_players, get_injuries,
-    get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings
+    get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings,
+    refresh_statsplus_api_token
 )
 from ai_power_rankings import generate_power_rankings as generate_ai_power_rankings
 
@@ -735,6 +736,24 @@ def trigger_daily_digest():
     import json
     import os
 
+    # ── CHECK & AUTO-REFRESH STATSPLUS API TOKEN ──────────────────────────────
+    print("Checking StatsPlus API token status...")
+    token_status = refresh_statsplus_api_token(LEAGUE_URL)
+    print(f"Token status: {token_status['status']} - {token_status['message']}")
+
+    if token_status["status"] == "expired":
+        warning_msg = (
+            "⚠️ *Warning: StatsPlus API Token Expired!*\n"
+            "The bot could not query the StatsPlus API because the token has expired.\n"
+            f"Please visit <{LEAGUE_URL.rstrip('/')}/mysettings/|StatsPlus Settings> to retrieve a fresh token and update `.env`."
+        )
+        print(warning_msg)
+        try:
+            client = WebClient(token=SLACK_BOT_TOKEN)
+            client.chat_postMessage(channel=SLACK_CHANNEL_ID, text=warning_msg)
+        except Exception as e:
+            print(f"Failed to post token expiration warning to Slack: {e}")
+
     # Load persistent state (used by oddity rotation, analytics mode, streaks, trivia)
     state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
     try:
@@ -745,6 +764,7 @@ def trigger_daily_digest():
 
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
+
 
     print(f"Detecting season phase...")
     season_phase = get_season_phase(LEAGUE_URL, best_pitcher, best_batter)
