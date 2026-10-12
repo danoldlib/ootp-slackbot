@@ -278,8 +278,32 @@ def build_analytics_blocks(analytics_data, streak_callouts=None, milestones=None
     return blocks
 
 
-def build_trade_tracker_blocks(trades, traded_eval):
-    return []
+def build_trade_tracker_blocks(trades, traded_eval=None):
+    if not trades and not traded_eval:
+        return []
+
+    blocks = [
+        {
+            "type": "section",
+            "text": {
+                "type": "mrkdwn",
+                "text": "🤝 *Trade Tracker*"
+            }
+        }
+    ]
+
+    if trades:
+        for t in trades[:5]:
+            blocks.append({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": f"• *{t.get('date', 'Recent')}* ({t.get('team', 'Trade')}): {t.get('action', '')}"
+                }
+            })
+
+    blocks.append({"type": "divider"})
+    return blocks
 
 def build_injury_blocks(injuries):
     return []
@@ -369,14 +393,19 @@ def build_division_races_blocks(races):
     ]
     
     for race in races:
+        if race.get('is_tied'):
+            text = f"*{race['division']}*: The *{race['second_place']}* and *{race['first_place']}* are currently tied for first place!"
+        else:
+            text = f"*{race['division']}*: The *{race['second_place']}* are trailing the *{race['first_place']}* by just *{race['gb']}* games!"
         blocks.append({
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": f"*{race['division']}*: The *{race['second_place']}* are trailing the *{race['first_place']}* by just *{race['gb']}* games!"
+                "text": text
             }
         })
         
+    blocks.append({"type": "divider"})
     return blocks
 
 def build_playoff_odds_blocks(odds_data):
@@ -805,70 +834,72 @@ def trigger_daily_digest():
     except Exception as e:
         print(f"Warning: Could not save state: {e}")
 
-    # Build summary text
+    print("Building Daily Digest blocks...")
+    performance_blocks = []
+    if best_pitcher:
+        performance_blocks.extend(build_performance_blocks(best_pitcher, "Pitcher of the Sim"))
+    if best_batter:
+        performance_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
+
+    headlines_blocks = build_headlines_blocks(headlines) if headlines else []
+    analytics_blocks = build_analytics_blocks(analytics_data, streak_callouts, milestones) if analytics_data else []
+    oddities_blocks = build_api_oddities_blocks(api_oddities) if api_oddities else []
+    notable_blocks = build_notable_games_blocks(notable_games) if notable_games else []
+    races_blocks = build_division_races_blocks(races) if races else []
+    playoff_blocks = build_playoff_odds_blocks(playoff_odds) if playoff_odds else []
+    power_blocks = build_power_rankings_blocks(power_rankings) if power_rankings else []
+    trade_blocks = build_trade_tracker_blocks(trades, traded_eval) if (trades or traded_eval) else []
+    injury_blocks = build_injury_blocks(injuries) if injuries else []
+    sweep_blocks = build_sweep_walkoff_blocks(sweeps_and_walkoffs) if (sweeps_and_walkoffs.get("sweeps") or sweeps_and_walkoffs.get("walkoffs")) else []
+    prospect_blocks = build_prospect_blocks(prospects) if prospects else []
+    rough_blocks = build_rough_outing_blocks(rough_outings) if rough_outings else []
+
+    # Build summary text ONLY from sections that actually produced blocks!
     summary_parts = []
-    if best_pitcher or best_batter:
+    if performance_blocks:
         summary_parts.append("Play of the Week")
-    if headlines:
+    if headlines_blocks:
         summary_parts.append(f"{len(headlines)} Headlines")
-    if analytics_data:
+    if analytics_blocks:
         summary_parts.append("Team Analytics")
-    if races:
+    if races_blocks:
         summary_parts.append(f"{len(races)} Pennant Races")
-    if playoff_odds:
+    if playoff_blocks:
         summary_parts.append("Playoff Projections")
-    if notable_games:
+    if notable_blocks:
         summary_parts.append(f"{len(notable_games)} Weird Moments")
-    if api_oddities:
+    if oddities_blocks:
         summary_parts.append(f"{len(api_oddities)} League Stats")
-    if power_rankings:
+    if power_blocks:
         summary_parts.append("Power Rankings")
-    if trades or traded_eval:
+    if trade_blocks:
         summary_parts.append("Trade Tracker")
-    if injuries:
+    if injury_blocks:
         summary_parts.append("Injury Report")
-    if sweeps_and_walkoffs["sweeps"]:
-        summary_parts.append("Sweeps")
-    if sweeps_and_walkoffs["walkoffs"]:
-        summary_parts.append("Walk-offs")
-    if prospects:
+    if sweep_blocks:
+        summary_parts.append("Sweeps/Walk-offs")
+    if prospect_blocks:
         summary_parts.append("Prospects")
-    if rough_outings:
+    if rough_blocks:
         summary_parts.append("Rough Outings")
     summary_text = "Includes: " + ", ".join(summary_parts) if summary_parts else "No notable updates this sim."
 
-    print("Building Daily Digest blocks...")
     all_blocks = []
     all_blocks.extend(build_sim_header_blocks(summary_text))
+    all_blocks.extend(performance_blocks)
+    all_blocks.extend(headlines_blocks)
+    all_blocks.extend(analytics_blocks)
+    all_blocks.extend(oddities_blocks)
+    all_blocks.extend(notable_blocks)
+    all_blocks.extend(races_blocks)
+    all_blocks.extend(playoff_blocks)
+    all_blocks.extend(power_blocks)
+    all_blocks.extend(trade_blocks)
+    all_blocks.extend(injury_blocks)
+    all_blocks.extend(sweep_blocks)
+    all_blocks.extend(prospect_blocks)
+    all_blocks.extend(rough_blocks)
 
-    if best_pitcher:
-        all_blocks.extend(build_performance_blocks(best_pitcher, "Pitcher of the Sim"))
-    if best_batter:
-        all_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
-    if headlines:
-        all_blocks.extend(build_headlines_blocks(headlines))
-    if analytics_data:
-        all_blocks.extend(build_analytics_blocks(analytics_data, streak_callouts, milestones))
-    if api_oddities:
-        all_blocks.extend(build_api_oddities_blocks(api_oddities))
-    if notable_games:
-        all_blocks.extend(build_notable_games_blocks(notable_games))
-    if races:
-        all_blocks.extend(build_division_races_blocks(races))
-    if playoff_odds:
-        all_blocks.extend(build_playoff_odds_blocks(playoff_odds))
-    if power_rankings:
-        all_blocks.extend(build_power_rankings_blocks(power_rankings))
-    if trades or traded_eval:
-        all_blocks.extend(build_trade_tracker_blocks(trades, traded_eval))
-    if injuries:
-        all_blocks.extend(build_injury_blocks(injuries))
-    if sweeps_and_walkoffs["sweeps"] or sweeps_and_walkoffs["walkoffs"]:
-        all_blocks.extend(build_sweep_walkoff_blocks(sweeps_and_walkoffs))
-    if prospects:
-        all_blocks.extend(build_prospect_blocks(prospects))
-    if rough_outings:
-        all_blocks.extend(build_rough_outing_blocks(rough_outings))
     # Remove the very last divider if it exists
     if all_blocks and all_blocks[-1].get("type") == "divider":
         all_blocks.pop()

@@ -18,14 +18,55 @@ def parse_ootp_date(date_str):
         print(f"Could not parse date: {date_str} - {e}")
         return None
 
+def get_statsplus_session():
+    """
+    Returns a requests.Session configured with browser headers and initialized
+    with cookies from the StatsPlus homepage to avoid 403 Forbidden responses.
+    """
+    session = requests.Session()
+    session.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
+    })
+    try:
+        session.get("https://statsplus.net/xfbl/", timeout=10)
+    except Exception:
+        pass
+    return session
+
 def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
     """
-    Temporarily disabled as there is no direct StatsPlus API equivalent for daily box scores.
+    Scrapes the Best Performances pages from StatsPlus.
+    Finds the highest ranked performance within the designated timeframe.
     """
-    return None, None
+    bat_url = f"{league_url}/bestgames/bat/"
+    pitch_url = f"{league_url}/bestgames/pitch/"
+    session = get_statsplus_session()
 
-def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitcher=False):
-    response = requests.get(url)
+    try:
+        home_html = session.get(league_url, timeout=10).text
+        home_soup = BeautifulSoup(home_html, 'html.parser')
+        date_element = home_soup.find(string=re.compile(r"Game Date:"))
+        if date_element:
+            date_str = date_element.replace("Game Date:", "").strip()
+            current_date = datetime.strptime(date_str, "%Y-%m-%d")
+        else:
+            current_date = datetime.now()
+    except Exception:
+        current_date = datetime.now()
+
+    cutoff_date = current_date - timedelta(days=days_back)
+    print(f"Looking for performances between {cutoff_date.strftime('%Y-%m-%d')} and {current_date.strftime('%Y-%m-%d')}")
+
+    best_batter = scrape_table_with_dates(bat_url, cutoff_date, current_date, league_url, is_pitcher=False, session=session)
+    best_pitcher = scrape_table_with_dates(pitch_url, cutoff_date, current_date, league_url, is_pitcher=True, session=session)
+
+    return best_pitcher, best_batter
+
+def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitcher=False, session=None):
+    if session is None:
+        session = get_statsplus_session()
+    response = session.get(url, timeout=15)
     soup = BeautifulSoup(response.text, 'html.parser')
     
     table = soup.find('table')
@@ -96,7 +137,79 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
     return None
 
 def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl"):
-    return []
+    recap_url = f"{league_url.rstrip('/')}/recap/"
+    try:
+        session = get_statsplus_session()
+        response = session.get(recap_url, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+    except Exception as e:
+        print(f"Error fetching recap page: {e}")
+        return []
+    
+    headlines = []
+    panel = soup.find(id='recap-msg-panel')
+    if not panel:
+        return headlines
+        
+    for div in panel.find_all('div', class_='smallfont oneline'):
+        text = " ".join(div.text.split())
+        
+        # 1. Career Milestones
+        match = re.search(r'reached (\d+) ([a-z\s]+)', text, re.IGNORECASE)
+        if match:
+            amount = int(match.group(1))
+            stat = match.group(2).strip().lower()
+            
+            is_impressive = False
+            if 'hit' in stat and not 'extra' in stat and amount >= 1000:
+                is_impressive = True
+            elif 'home run' in stat and amount >= 200:
+                is_impressive = True
+            elif 'win' in stat and amount >= 150:
+                is_impressive = True
+            elif 'strikeout' in stat and amount >= 1000:
+                is_impressive = True
+            elif 'save' in stat and amount >= 200:
+                is_impressive = True
+            elif 'rbi' in stat and amount >= 1000:
+                is_impressive = True
+            elif 'extra base' in stat and amount >= 500:
+                is_impressive = True
+                
+            if is_impressive:
+                name_match = re.search(r'^[A-Z0-9]{1,2} ([^\(]+) \(([A-Z]+)\)', text)
+                if name_match:
+                    name = name_match.group(1).strip()
+                    team = name_match.group(2).strip()
+                    headlines.append(f"🎖️ *{name}* ({team}) reached *{amount:,} {stat}*.")
+            continue
+            
+        # 2. Rare Feats & Special Events
+        name_match = re.search(r'^[A-Z0-9]{1,2} ([^\(]+) \(([A-Z]+)\)', text)
+        if name_match:
+            name = name_match.group(1).strip()
+            team = name_match.group(2).strip()
+            
+            if re.search(r'NO-HITTER', text):
+                headlines.append(f"🎩 *NO-HITTER Alert*: {name} ({team}) threw a no-hitter!")
+            elif re.search(r'PERFECT GAME', text):
+                headlines.append(f"👑 *PERFECT GAME Alert*: {name} ({team}) threw a perfect game!")
+            elif re.search(r'hits for the CYCLE', text, re.IGNORECASE):
+                headlines.append(f"🚲 *Cycle Watch*: {name} ({team}) hit for the cycle!")
+            elif re.search(r'WALK-OFF|walk-off', text):
+                headlines.append(f"🚨 *Walk-off Magic*: {name} ({team}) delivered a walk-off hit!")
+            elif re.search(r'Major League debut|MLB debut', text, re.IGNORECASE):
+                headlines.append(f"👶 *Prospect Watch*: {name} ({team}) made his Major League debut.")
+
+    # Deduplicate headlines while preserving order
+    seen = set()
+    deduped = []
+    for h in headlines:
+        if h not in seen:
+            seen.add(h)
+            deduped.append(h)
+            
+    return deduped
 
 TEAM_MAPPING = {
     "ANA": "Anaheim Angels", "ARI": "Arizona Diamondbacks", "ATL": "Atlanta Braves",
@@ -136,50 +249,183 @@ def get_close_division_races(league_url="https://statsplus.net/xfbl"):
         print(f"Error fetching API lgdata: {e}")
         return []
         
-    teams_dict = {t['team_id']: t for t in data.get('teams', [])}
-    divs_dict = {d['division_id']: d for d in data.get('divisions', [])}
-    
+    primary_lid = 100
+    for l in data.get('leagues', []):
+        if l.get('primary_league'):
+            primary_lid = l.get('league_id')
+            break
+
+    subleagues_dict = {
+        sl['sub_league_id']: sl.get('abbr') or sl.get('name')
+        for sl in data.get('subleagues', [])
+        if sl.get('league_id') == primary_lid
+    }
+
+    divs_dict = {
+        (d.get('sub_league_id', 0), d['division_id']): d.get('name', 'Unknown')
+        for d in data.get('divisions', [])
+        if d.get('league_id') == primary_lid
+    }
+
+    teams_dict = {
+        t['team_id']: t
+        for t in data.get('teams', [])
+        if t.get('league_id') == primary_lid
+    }
+
+    primary_standings = [
+        st for st in data.get('standings', [])
+        if st.get('team_id') in teams_dict
+    ]
+
+    # Suppress pennant races during the first month/30 games of the season
+    max_games = max((st.get('g', 0) for st in primary_standings), default=0)
+    if max_games < 30:
+        return []
+
     div_standings = {}
-    for st in data.get('standings', []):
+    for st in primary_standings:
         tid = st['team_id']
         team_info = teams_dict.get(tid)
         if not team_info:
             continue
-        did = team_info.get('division_id')
-        if did not in div_standings:
-            div_standings[did] = []
-        div_standings[did].append({
+        sl_id = team_info.get('sub_league_id', 0)
+        did = team_info.get('division_id', 0)
+        div_key = (sl_id, did)
+        if div_key not in div_standings:
+            div_standings[div_key] = []
+        div_standings[div_key].append({
             'team_name': f"{team_info.get('name')} {team_info.get('nickname')}",
             'gb': st.get('gb', 0),
             'pos': st.get('pos', 99)
         })
-        
+
     close_races = []
-    for did, st_list in div_standings.items():
-        div_name = divs_dict.get(did, {}).get('name', 'Unknown')
+    for (sl_id, did), st_list in div_standings.items():
+        div_base_name = divs_dict.get((sl_id, did), 'Unknown')
+        sl_name = subleagues_dict.get(sl_id, '')
+        full_div_name = f"{sl_name} {div_base_name}".strip() if sl_name else div_base_name
+
         st_list.sort(key=lambda x: x['pos'])
-        
         if len(st_list) >= 2:
             first = st_list[0]
             second = st_list[1]
             gb_val = second['gb']
-            
             if gb_val <= 2.0:
-                gb_str = "-" if gb_val == 0 else str(gb_val)
+                is_tied = (gb_val == 0)
+                gb_str = "0" if is_tied else str(gb_val)
                 close_races.append({
-                    "division": div_name,
+                    "division": full_div_name,
                     "first_place": first['team_name'],
                     "second_place": second['team_name'],
-                    "gb": gb_str
+                    "gb": gb_str,
+                    "is_tied": is_tied
                 })
-                
+
     return close_races
 
 def get_playoff_odds(league_url="https://statsplus.net/xfbl"):
     return None
 
 def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
-    return []
+    """
+    Scans the best batting performances for noteworthy/weird games:
+    - Blowouts (margin of 10+ runs)
+    - High-scoring affairs (combined score 20+)
+    - Individual players hitting 3+ HRs in a game
+    """
+    from urllib.parse import urljoin
+    bat_url = f"{league_url}/bestgames/bat/"
+    session = get_statsplus_session()
+
+    try:
+        home_html = session.get(league_url, timeout=10).text
+        home_soup = BeautifulSoup(home_html, 'html.parser')
+        date_element = home_soup.find(string=re.compile(r"Game Date:"))
+        if date_element:
+            date_str = date_element.replace("Game Date:", "").strip()
+            current_date = datetime.strptime(date_str, "%Y-%m-%d")
+        else:
+            current_date = datetime.now()
+    except Exception:
+        current_date = datetime.now()
+
+    cutoff_date = current_date - timedelta(days=days_back)
+
+    try:
+        response = session.get(bat_url, timeout=15)
+        soup = BeautifulSoup(response.text, 'html.parser')
+        table = soup.find('table')
+        if not table:
+            return []
+    except Exception:
+        return []
+
+    tbody = table.find('tbody')
+    rows = tbody.find_all('tr') if tbody else table.find_all('tr')
+
+    notable = []
+    seen_games = set()
+
+    for row in rows:
+        cols = row.find_all('td')
+        if not cols or len(cols) < 10:
+            continue
+
+        player_link = cols[1].find('a')
+        player_name = player_link.text.strip() if player_link else cols[1].text.strip()
+        team_abbr = cols[2].text.strip()
+        opponent = cols[3].text.strip()
+        date_str = cols[4].text.strip()
+        game_date = parse_ootp_date(date_str)
+
+        if not game_date or not (cutoff_date <= game_date <= current_date):
+            continue
+
+        box_link_tag = cols[5].find('a')
+        score_text = box_link_tag.text.strip() if box_link_tag else ""
+        box_url = urljoin(league_url, box_link_tag['href']) if box_link_tag else ""
+
+        stats = [c.text.strip() for c in cols[6:]]
+        if len(stats) >= 4:
+            try:
+                hr_count = int(stats[3])
+                if hr_count >= 3:
+                    notable.append({
+                        "type": "multi_hr",
+                        "text": f"💣 *{player_name}* ({team_abbr}) went deep *{hr_count} times* in a single game vs {opponent}!",
+                        "box_url": box_url
+                    })
+            except (ValueError, IndexError):
+                pass
+
+        score_match = re.match(r'(\d+)-(\d+)', score_text)
+        if score_match and box_url not in seen_games:
+            seen_games.add(box_url)
+            r1, r2 = int(score_match.group(1)), int(score_match.group(2))
+            margin = abs(r1 - r2)
+            total = r1 + r2
+            if margin >= 10:
+                notable.append({
+                    "type": "blowout",
+                    "text": f"💥 *Blowout Alert!* {team_abbr} vs {opponent} ended *{score_text}* — a {margin}-run shellacking.",
+                    "box_url": box_url
+                })
+            elif total >= 20:
+                notable.append({
+                    "type": "slugfest",
+                    "text": f"⚡ *Run Fest!* {team_abbr} vs {opponent} combined for *{total} runs* in a wild {score_text} affair.",
+                    "box_url": box_url
+                })
+
+    seen_texts = set()
+    deduped = []
+    for item in notable:
+        if item['text'] not in seen_texts:
+            seen_texts.add(item['text'])
+            deduped.append(item)
+
+    return deduped[:5]
 
 
 def get_api_oddities(league_url="https://statsplus.net/xfbl"):
@@ -195,11 +441,14 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
     """
     import csv
     import io
+    import os
 
-    bat_api = f"{league_url}/api/playerbatstatsv2/"
-    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
-    players_api = f"{league_url}/api/players/"
-    teams_api = f"{league_url}/api/teams/"
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_query = f"?token={token}" if token else ""
+    bat_api = f"{league_url}/api/playerbatstatsv2/{token_query}"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/{token_query}"
+    players_api = f"{league_url}/api/players/{token_query}"
+    teams_api = f"{league_url}/api/teams/{token_query}"
 
     def fetch_csv(url):
         try:
@@ -249,7 +498,19 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
         ab = safe_int(r, 'ab')
         return h / ab if ab > 0 else 0.0
 
-    qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= 100]
+    # Adaptive sample size thresholds for early season / Opening Day
+    max_pa = max((safe_int(r, 'pa') for r in bat_overall), default=0)
+    min_pa = 100 if max_pa >= 100 else max(3, int(max_pa * 0.7))
+    min_gdp = 5 if max_pa >= 100 else 1
+    min_hr_ab_ab = 50 if max_pa >= 100 else 5
+    min_hr_ab_hr = 5 if max_pa >= 100 else 1
+    min_raw_hr = 5 if max_pa >= 100 else 1
+    min_sb = 5 if max_pa >= 100 else 1
+    min_3b = 2 if max_pa >= 100 else 1
+    min_rbi = 15 if max_pa >= 100 else 2
+    min_cs = 3 if max_pa >= 100 else 1
+
+    qualified_bat = [r for r in bat_overall if safe_int(r, 'pa') >= min_pa]
 
     if qualified_bat:
         k_king = max(qualified_bat, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'pa'), 1))
@@ -268,7 +529,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             "emoji": "🚶", "winner_id": bb_king['player_id']
         }
 
-        gdp_leaders = [r for r in bat_overall if safe_int(r, 'gdp') >= 5]
+        gdp_leaders = [r for r in bat_overall if safe_int(r, 'gdp') >= min_gdp]
         if gdp_leaders:
             gdp_king = max(gdp_leaders, key=lambda r: safe_int(r, 'gdp'))
             name, team = pname(gdp_king['player_id'], gdp_king['team_id'])
@@ -277,7 +538,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "💀", "winner_id": gdp_king['player_id']
             }
 
-        hr_rate_leaders = [r for r in bat_overall if safe_int(r, 'ab') >= 50 and safe_int(r, 'hr') >= 5]
+        hr_rate_leaders = [r for r in bat_overall if safe_int(r, 'ab') >= min_hr_ab_ab and safe_int(r, 'hr') >= min_hr_ab_hr]
         if hr_rate_leaders:
             hr_king = max(hr_rate_leaders, key=lambda r: safe_int(r, 'hr') / max(safe_int(r, 'ab'), 1))
             ab_per_hr = safe_int(hr_king, 'ab') / safe_int(hr_king, 'hr')
@@ -287,7 +548,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "💣", "winner_id": hr_king['player_id']
             }
 
-        hr_raw_leaders = [r for r in bat_overall if safe_int(r, 'hr') >= 5]
+        hr_raw_leaders = [r for r in bat_overall if safe_int(r, 'hr') >= min_raw_hr]
         if hr_raw_leaders:
             hr_raw_king = max(hr_raw_leaders, key=lambda r: safe_int(r, 'hr'))
             name, team = pname(hr_raw_king['player_id'], hr_raw_king['team_id'])
@@ -296,7 +557,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🏡", "winner_id": hr_raw_king['player_id']
             }
 
-        sb_leaders = [r for r in bat_overall if safe_int(r, 'sb') >= 5]
+        sb_leaders = [r for r in bat_overall if safe_int(r, 'sb') >= min_sb]
         if sb_leaders:
             sb_king = max(sb_leaders, key=lambda r: safe_int(r, 'sb'))
             cs = safe_int(sb_king, 'cs')
@@ -317,7 +578,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🏆", "winner_id": war_king['player_id']
             }
 
-        wpa_losers = [r for r in bat_overall if safe_float(r, 'wpa') < -0.5 and safe_int(r, 'pa') >= 100]
+        wpa_losers = [r for r in bat_overall if safe_float(r, 'wpa') < -0.2 and safe_int(r, 'pa') >= min_pa]
         if wpa_losers:
             wpa_loser = min(wpa_losers, key=lambda r: safe_float(r, 'wpa'))
             name, team = pname(wpa_loser['player_id'], wpa_loser['team_id'])
@@ -347,7 +608,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🎯", "winner_id": contact_king['player_id']
             }
 
-        triple_leaders = [r for r in bat_overall if safe_int(r, '3b') >= 2]
+        triple_leaders = [r for r in bat_overall if safe_int(r, '3b') >= min_3b]
         if triple_leaders:
             triple_king = max(triple_leaders, key=lambda r: safe_int(r, '3b'))
             name, team = pname(triple_king['player_id'], triple_king['team_id'])
@@ -372,7 +633,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🤡", "winner_id": babip_victim['player_id']
             }
 
-        rbi_dep = [r for r in bat_overall if safe_int(r, 'rbi') >= 15 and safe_int(r, 'hr') <= 3]
+        rbi_dep = [r for r in bat_overall if safe_int(r, 'rbi') >= min_rbi and safe_int(r, 'hr') <= 3]
         if rbi_dep:
             rbi_king = max(rbi_dep, key=lambda r: safe_int(r, 'rbi'))
             name, team = pname(rbi_king['player_id'], rbi_king['team_id'])
@@ -381,7 +642,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🤝", "winner_id": rbi_king['player_id']
             }
 
-        cs_leaders = [r for r in bat_overall if safe_int(r, 'cs') >= 3]
+        cs_leaders = [r for r in bat_overall if safe_int(r, 'cs') >= min_cs]
         if cs_leaders:
             cs_king = max(cs_leaders, key=lambda r: safe_int(r, 'cs'))
             sb = safe_int(cs_king, 'sb')
@@ -410,8 +671,20 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
     pitch_rows = fetch_csv(pitch_api)
     pitch_overall = [r for r in pitch_rows if r.get('split_id') == '1']
 
-    qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= 20 and safe_int(r, 'gs') >= 3]
-    qualified_rp = [r for r in pitch_overall if safe_float(r, 'ip') >= 10 and safe_int(r, 'gs') == 0]
+    max_sp_ip = max((safe_float(r, 'ip') for r in pitch_overall), default=0.0)
+    min_sp_ip = 20.0 if max_sp_ip >= 20.0 else max(1.0, max_sp_ip * 0.5)
+    min_sp_gs = 3 if max_sp_ip >= 20.0 else 1
+
+    max_rp_ip = max((safe_float(r, 'ip') for r in pitch_overall if safe_int(r, 'gs') == 0), default=0.0)
+    min_rp_ip = 10.0 if max_rp_ip >= 10.0 else max(1.0, max_rp_ip * 0.3)
+
+    min_qs = 3 if max_sp_ip >= 20.0 else 1
+    min_hr_allowed = 3 if max_sp_ip >= 20.0 else 1
+    min_save_opp = 3 if max_sp_ip >= 20.0 else 1
+    min_bs = 2 if max_sp_ip >= 20.0 else 1
+
+    qualified_sp = [r for r in pitch_overall if safe_float(r, 'ip') >= min_sp_ip and safe_int(r, 'gs') >= min_sp_gs]
+    qualified_rp = [r for r in pitch_overall if safe_float(r, 'ip') >= min_rp_ip and safe_int(r, 'gs') == 0]
 
     if qualified_sp:
         k_bf_king = max(qualified_sp, key=lambda r: safe_int(r, 'k') / max(safe_int(r, 'bf'), 1))
@@ -473,7 +746,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🏔️", "winner_id": gb_king['player_id']
             }
 
-        qs_leaders = [r for r in qualified_sp if safe_int(r, 'qs') >= 3]
+        qs_leaders = [r for r in qualified_sp if safe_int(r, 'qs') >= min_qs]
         if qs_leaders:
             qs_king = max(qs_leaders, key=lambda r: safe_int(r, 'qs'))
             name, team = pname(qs_king['player_id'], qs_king['team_id'])
@@ -484,7 +757,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                 "emoji": "🎭", "winner_id": qs_king['player_id']
             }
 
-        hr_allowed_leaders = [r for r in qualified_sp if safe_int(r, 'hr') >= 3]
+        hr_allowed_leaders = [r for r in qualified_sp if safe_int(r, 'hr') >= min_hr_allowed]
         if hr_allowed_leaders:
             hr_allowed_king = max(hr_allowed_leaders, key=lambda r: safe_int(r, 'hr'))
             name, team = pname(hr_allowed_king['player_id'], hr_allowed_king['team_id'])
@@ -509,7 +782,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
             }
 
     if qualified_rp:
-        sv_leaders = [r for r in qualified_rp if (safe_int(r, 's') + safe_int(r, 'bs')) >= 3]
+        sv_leaders = [r for r in qualified_rp if (safe_int(r, 's') + safe_int(r, 'bs')) >= min_save_opp]
         if sv_leaders:
             sv_king = max(sv_leaders, key=lambda r: safe_int(r, 's') / max(safe_int(r, 's') + safe_int(r, 'bs'), 1))
             svs = safe_int(sv_king, 's')
@@ -521,7 +794,7 @@ def get_api_oddities(league_url="https://statsplus.net/xfbl"):
                     "emoji": "🔒", "winner_id": sv_king['player_id']
                 }
 
-        bs_leaders = [r for r in qualified_rp if safe_int(r, 'bs') >= 2]
+        bs_leaders = [r for r in qualified_rp if safe_int(r, 'bs') >= min_bs]
         if bs_leaders:
             bs_king = max(bs_leaders, key=lambda r: safe_int(r, 'bs'))
             name, team = pname(bs_king['player_id'], bs_king['team_id'])
