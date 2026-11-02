@@ -7,3 +7,7 @@ services:
     restart: always
     env_file:
       - .env
+    volumes:
+      - ./.env:/app/.env
+      - ./state.json:/app/state.json
+

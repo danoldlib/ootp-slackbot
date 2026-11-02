@@ -3,7 +3,7 @@ from bs4 import BeautifulSoup
 import re
 import os
 from datetime import datetime, timedelta
-from dotenv import load_dotenv
+from dotenv import load_dotenv, set_key
 
 load_dotenv()
 
@@ -71,19 +71,10 @@ def refresh_statsplus_api_token(league_url="https://statsplus.net/xfbl"):
                 os.environ["STATSPLUS_API_TOKEN"] = new_token
                 # Update .env file
                 env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-                if os.path.exists(env_path):
-                    with open(env_path, "r", encoding="utf-8") as f:
-                        lines = f.readlines()
-                    updated = False
-                    for idx, line in enumerate(lines):
-                        if line.startswith("STATSPLUS_API_TOKEN="):
-                            lines[idx] = f"STATSPLUS_API_TOKEN={new_token}\n"
-                            updated = True
-                            break
-                    if not updated:
-                        lines.append(f"\nSTATSPLUS_API_TOKEN={new_token}\n")
-                    with open(env_path, "w", encoding="utf-8") as f:
-                        f.writelines(lines)
+                try:
+                    set_key(env_path, "STATSPLUS_API_TOKEN", new_token)
+                except Exception as e:
+                    print(f"Warning: Could not update .env file via set_key: {e}")
                 print(f"StatsPlus API token automatically rotated! Expires: {expires}")
                 return {
                     "status": "refreshed",

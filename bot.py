@@ -988,11 +988,32 @@ def handle_message_events(body, logger):
     elif event.get("blocks"):
         print(f"📦 Block message received (Subtype: {subtype})")
 
+def start_token_refresh_scheduler():
+    def loop():
+        while True:
+            # Check and refresh token every 12 hours (43200 seconds)
+            time.sleep(43200)
+            try:
+                print("Running scheduled StatsPlus API token check...", flush=True)
+                res = refresh_statsplus_api_token(LEAGUE_URL)
+                print(f"Scheduled token status: {res.get('status')} - {res.get('message')}", flush=True)
+            except Exception as e:
+                print(f"Scheduled token refresh error: {e}", flush=True)
+
+    t = threading.Thread(target=loop, daemon=True)
+    t.start()
+
 def main():
     if not SLACK_APP_TOKEN or not SLACK_BOT_TOKEN:
         print("Missing SLACK_APP_TOKEN or SLACK_BOT_TOKEN. Cannot start Socket Mode.")
         return
-        
+
+    # Check token on startup and launch background refresh scheduler
+    print("Checking StatsPlus API token status on startup...", flush=True)
+    token_status = refresh_statsplus_api_token(LEAGUE_URL)
+    print(f"Token status: {token_status['status']} - {token_status['message']}", flush=True)
+    start_token_refresh_scheduler()
+
     print("Starting Slack bot in Socket Mode...")
     handler = SocketModeHandler(app, SLACK_APP_TOKEN)
     handler.start()
