@@ -1458,9 +1458,11 @@ def get_streaks_and_records(league_url, state):
         print(f"Error computing streaks: {e}")
 
     # --- Season Records via batting/pitching API ---
-    bat_api = f"{league_url}/api/playerbatstatsv2/"
-    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
-    players_api = f"{league_url}/api/players/"
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_query = f"?token={token}" if token else ""
+    bat_api = f"{league_url}/api/playerbatstatsv2/{token_query}"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/{token_query}"
+    players_api = f"{league_url}/api/players/{token_query}"
 
     def fetch_csv(url):
         try:
@@ -1555,9 +1557,11 @@ def get_milestone_countdowns(league_url):
     import csv
     import io
 
-    bat_api = f"{league_url}/api/playerbatstatsv2/"
-    pitch_api = f"{league_url}/api/playerpitchstatsv2/"
-    players_api = f"{league_url}/api/players/"
+    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token_query = f"?token={token}" if token else ""
+    bat_api = f"{league_url}/api/playerbatstatsv2/{token_query}"
+    pitch_api = f"{league_url}/api/playerpitchstatsv2/{token_query}"
+    players_api = f"{league_url}/api/players/{token_query}"
 
     HIT_MILESTONES = [500, 1000, 1500, 2000, 2500, 3000]
     HR_MILESTONES = [100, 200, 300, 400, 500]
