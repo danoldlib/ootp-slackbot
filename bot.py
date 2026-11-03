@@ -327,7 +327,20 @@ def build_trade_tracker_blocks(trades, traded_eval=None):
 def build_injury_blocks(injuries):
     if not injuries:
         return []
-    lines = ["🚑 *Notable Injury Report*"] + [f"• {inj}" for inj in injuries[:8]]
+    lines = ["🚑 *Notable Injury Report*"]
+    for inj in injuries[:8]:
+        if isinstance(inj, dict):
+            date_str = inj.get("date", "")
+            text_str = inj.get("text", "")
+            if " : " in text_str:
+                team_part, rest = text_str.split(" : ", 1)
+                text_str = f"*{team_part.strip()}*: {rest.strip()}"
+            if date_str:
+                lines.append(f"• ({date_str}) {text_str}")
+            else:
+                lines.append(f"• {text_str}")
+        else:
+            lines.append(f"• {inj}")
     return [
         {
             "type": "section",
@@ -345,9 +358,16 @@ def build_sweep_walkoff_blocks(data):
         return []
     lines = ["🧹 *Sweeps & Walk-Off Drama*"]
     for s in sweeps[:5]:
-        lines.append(f"• {s}")
+        s_text = s.get("text", "") if isinstance(s, dict) else str(s)
+        lines.append(f"• {s_text}")
     for w in walkoffs[:5]:
-        lines.append(f"• {w}")
+        if isinstance(w, dict):
+            w_text = w.get("text", "")
+            if w.get("box_url"):
+                w_text += f" (<{w['box_url']}|Box Score>)"
+            lines.append(f"• {w_text}")
+        else:
+            lines.append(f"• {w}")
     return [
         {
             "type": "section",
@@ -359,7 +379,10 @@ def build_sweep_walkoff_blocks(data):
 def build_prospect_blocks(prospects):
     if not prospects:
         return []
-    lines = ["🌱 *Prospect Call-Ups & Debuts*"] + [f"• {p}" for p in prospects[:6]]
+    lines = ["🌱 *Prospect Call-Ups & Debuts*"]
+    for p in prospects[:6]:
+        p_text = p.get("text", "") if isinstance(p, dict) else str(p)
+        lines.append(f"• {p_text}")
     return [
         {
             "type": "section",
@@ -371,7 +394,10 @@ def build_prospect_blocks(prospects):
 def build_rough_outing_blocks(outings):
     if not outings:
         return []
-    lines = ["💥 *Rough Outings of the Sim*"] + [f"• {o}" for o in outings[:4]]
+    lines = ["💥 *Rough Outings of the Sim*"]
+    for o in outings[:4]:
+        o_text = o.get("text", "") if isinstance(o, dict) else str(o)
+        lines.append(f"• {o_text}")
     return [
         {
             "type": "section",
