@@ -17,7 +17,7 @@ from scraper import (
     get_offseason_data, get_playoff_odds,
     get_regular_season_trades, evaluate_traded_players, get_injuries,
     get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings,
-    refresh_statsplus_api_token
+    refresh_statsplus_api_token, get_league_current_date
 )
 from ai_power_rankings import generate_power_rankings as generate_ai_power_rankings
 
@@ -29,6 +29,8 @@ SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
 SLACK_CHANNEL_ID = os.getenv("SLACK_CHANNEL_ID")
 LEAGUE_URL = os.getenv("LEAGUE_URL", "https://statsplus.net/xfbl")
 DAYS_BACK = int(os.getenv("DAYS_BACK", "7"))
+SIM_WAIT_SECONDS = int(os.getenv("SIM_WAIT_SECONDS", "300"))
+_digest_lock = threading.Lock()
 
 app = App(token=SLACK_BOT_TOKEN)
 
@@ -164,93 +166,103 @@ def build_analytics_blocks(analytics_data, streak_callouts=None, milestones=None
     Accepts the dict from get_sim_analytics() and renders the correct mode.
     Optionally appends streak callouts and milestone countdowns.
     """
-    if not analytics_data:
+    if not analytics_data and not streak_callouts and not milestones:
         return []
 
-    mode = analytics_data.get("mode", "standard")
+    mode = (analytics_data or {}).get("mode", "standard")
     blocks = []
 
-    if mode == "standard":
+    if mode == "standard" and analytics_data:
         hottest = analytics_data.get("hottest")
         coldest = analytics_data.get("coldest")
         luckiest = analytics_data.get("luckiest")
         unluckiest = analytics_data.get("unluckiest")
-        if not hottest or not luckiest:
-            return []
-        blocks = [
-            {
+        if hottest and coldest:
+            blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends*"}
-            },
-            {
+            })
+            blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": f"🔥 *Who's Hot*: The *{hottest['team']}* surged this sim, gaining *+{hottest['change']}* ELO points.\n🧊 *Who's Not*: The *{coldest['team']}* collapsed, dropping *{coldest['change']}* ELO points."
                 }
-            },
-            {
+            })
+        if luckiest and unluckiest:
+            if not blocks:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends*"}
+                })
+            blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": f"🍀 *Luckiest Team*: The *{luckiest['team']}* have *+{luckiest['luck']}* more wins than their BaseRuns predict ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Unluckiest Team*: The *{unluckiest['team']}* have *{unluckiest['luck']}* fewer wins than their BaseRuns predict ({unluckiest['actual']} actual vs {unluckiest['expected']} expected)."
                 }
-            },
-        ]
+            })
 
-    elif mode == "rankings_shakeup":
+    elif mode == "rankings_shakeup" and analytics_data:
         gainer = analytics_data.get("biggest_gainer")
         loser = analytics_data.get("biggest_loser")
         luckiest = analytics_data.get("luckiest")
         unluckiest = analytics_data.get("unluckiest")
-        if not gainer or not luckiest:
-            return []
-        blocks = [
-            {
+        if gainer and loser:
+            blocks.append({
                 "type": "section",
                 "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Rankings Shakeup Edition*"}
-            },
-            {
+            })
+            blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": f"📈 *Biggest Climber*: The *{gainer['team']}* made the biggest jump this sim, gaining *+{gainer['change']}* ELO points.\n📉 *Biggest Faller*: The *{loser['team']}* took the hardest hit, dropping *{loser['change']}* ELO points."
                 }
-            },
-            {
+            })
+        if luckiest and unluckiest:
+            if not blocks:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Rankings Shakeup Edition*"}
+                })
+            blocks.append({
                 "type": "section",
                 "text": {
                     "type": "mrkdwn",
                     "text": f"🍀 *Running Lucky*: The *{luckiest['team']}* still have *+{luckiest['luck']}* more wins than BaseRuns predicts ({luckiest['actual']} actual vs {luckiest['expected']} expected).\n🌩️ *Still Getting Robbed*: The *{unluckiest['team']}* remain *{unluckiest['luck']}* wins below their BaseRuns expectation."
                 }
-            },
-        ]
+            })
 
-    elif mode == "luck_focus":
+    elif mode == "luck_focus" and analytics_data:
         hottest = analytics_data.get("hottest")
         coldest = analytics_data.get("coldest")
         luckiest = analytics_data.get("luckiest")
         unluckiest = analytics_data.get("unluckiest")
-        if not luckiest:
-            return []
-        blocks = [
-            {
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Luck Report*"}
-            },
-            {
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": (
-                        f"⚖️ *BaseRuns Luck Standings* — who's been blessed and who's been robbed:\n"
-                        f"🍀 *{luckiest['team']}*: *+{luckiest['luck']}* wins above expectation ({luckiest['actual']} actual vs {luckiest['expected']} expected) — riding some serious fortune.\n"
-                        f"🌩️ *{unluckiest['team']}*: *{unluckiest['luck']}* wins below expectation ({unluckiest['actual']} actual vs {unluckiest['expected']} expected) — the simulation engine has been brutal."
-                    )
-                }
-            },
-        ]
+        if luckiest and unluckiest:
+            blocks = [
+                {
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Luck Report*"}
+                },
+                {
+                    "type": "section",
+                    "text": {
+                        "type": "mrkdwn",
+                        "text": (
+                            f"⚖️ *BaseRuns Luck Standings* — who's been blessed and who's been robbed:\n"
+                            f"🍀 *{luckiest['team']}*: *+{luckiest['luck']}* wins above expectation ({luckiest['actual']} actual vs {luckiest['expected']} expected) — riding some serious fortune.\n"
+                            f"🌩️ *{unluckiest['team']}*: *{unluckiest['luck']}* wins below expectation ({unluckiest['actual']} actual vs {unluckiest['expected']} expected) — the simulation engine has been brutal."
+                        )
+                    }
+                },
+            ]
         if hottest and coldest:
+            if not blocks:
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends: Luck Report*"}
+                })
             blocks.append({
                 "type": "section",
                 "text": {
@@ -259,21 +271,29 @@ def build_analytics_blocks(analytics_data, streak_callouts=None, milestones=None
                 }
             })
 
+    if not blocks and (streak_callouts or milestones):
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "📊 *Sim Analytics & Trends*"}
+        })
+
     # Append streak callouts
     if streak_callouts:
-        for callout in streak_callouts:
-            blocks.append({
-                "type": "section",
-                "text": {"type": "mrkdwn", "text": callout}
-            })
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(streak_callouts)}
+        })
 
     # Append milestone countdowns
     if milestones:
         milestones_text = "\n".join(milestones)
         blocks.append({
             "type": "section",
-            "text": {"type": "mrkdwn", "text": milestones_text}
+            "text": {"type": "mrkdwn", "text": f"⏳ *Milestone Watch*\n{milestones_text}"}
         })
+
+    if not blocks:
+        return []
 
     blocks.append({"type": "divider"})
     return blocks
@@ -283,40 +303,82 @@ def build_trade_tracker_blocks(trades, traded_eval=None):
     if not trades and not traded_eval:
         return []
 
-    blocks = [
+    lines = ["🤝 *Trade Tracker*"]
+    if trades:
+        for t in trades[:5]:
+            lines.append(f"• *{t.get('date', 'Recent')}* ({t.get('team', 'Trade')}): {t.get('action', '')}")
+    if traded_eval:
+        if trades:
+            lines.append("_How Recent Acquisitions Are Faring:_")
+        for item in traded_eval[:4]:
+            lines.append(f"• {item}")
+
+    return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "🤝 *Trade Tracker*"
+                "text": "\n".join(lines)
             }
-        }
+        },
+        {"type": "divider"}
     ]
 
-    if trades:
-        for t in trades[:5]:
-            blocks.append({
-                "type": "section",
-                "text": {
-                    "type": "mrkdwn",
-                    "text": f"• *{t.get('date', 'Recent')}* ({t.get('team', 'Trade')}): {t.get('action', '')}"
-                }
-            })
-
-    blocks.append({"type": "divider"})
-    return blocks
-
 def build_injury_blocks(injuries):
-    return []
+    if not injuries:
+        return []
+    lines = ["🚑 *Notable Injury Report*"] + [f"• {inj}" for inj in injuries[:8]]
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+        },
+        {"type": "divider"}
+    ]
 
 def build_sweep_walkoff_blocks(data):
-    return []
+    if not data:
+        return []
+    sweeps = data.get("sweeps", [])
+    walkoffs = data.get("walkoffs", [])
+    if not sweeps and not walkoffs:
+        return []
+    lines = ["🧹 *Sweeps & Walk-Off Drama*"]
+    for s in sweeps[:5]:
+        lines.append(f"• {s}")
+    for w in walkoffs[:5]:
+        lines.append(f"• {w}")
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+        },
+        {"type": "divider"}
+    ]
 
 def build_prospect_blocks(prospects):
-    return []
+    if not prospects:
+        return []
+    lines = ["🌱 *Prospect Call-Ups & Debuts*"] + [f"• {p}" for p in prospects[:6]]
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+        },
+        {"type": "divider"}
+    ]
 
 def build_rough_outing_blocks(outings):
-    return []
+    if not outings:
+        return []
+    lines = ["💥 *Rough Outings of the Sim*"] + [f"• {o}" for o in outings[:4]]
+    return [
+        {
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+        },
+        {"type": "divider"}
+    ]
 
 def build_notable_games_blocks(notable_games):
     if not notable_games:
@@ -332,7 +394,7 @@ def build_notable_games_blocks(notable_games):
         }
     ]
 
-    for game in notable_games:
+    for idx, game in enumerate(notable_games):
         block = {
             "type": "section",
             "text": {
@@ -345,7 +407,7 @@ def build_notable_games_blocks(notable_games):
                 "type": "button",
                 "text": {"type": "plain_text", "text": "Box Score", "emoji": True},
                 "url": game['box_url'],
-                "action_id": f"btn_notable_{notable_games.index(game)}"
+                "action_id": f"btn_notable_{idx}"
             }
         blocks.append(block)
 
@@ -356,58 +418,43 @@ def build_api_oddities_blocks(oddities):
     if not oddities:
         return []
 
-    blocks = [
+    lines = ["📊 *By the Numbers: League Oddities*"]
+    for item in oddities:
+        lines.append(item['text'])
+
+    return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "📊 *By the Numbers: League Oddities*"
+                "text": "\n\n".join(lines)
             }
-        }
+        },
+        {"type": "divider"}
     ]
-
-    for item in oddities:
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": item['text']
-            }
-        })
-
-    blocks.append({"type": "divider"})
-    return blocks
 
 
 def build_division_races_blocks(races):
     if not races:
         return []
-        
-    blocks = [
+
+    lines = ["🏁 *Pennant Race Watch*"]
+    for race in races:
+        if race.get('is_tied'):
+            lines.append(f"• *{race['division']}*: The *{race['second_place']}* and *{race['first_place']}* are currently tied for first place!")
+        else:
+            lines.append(f"• *{race['division']}*: The *{race['second_place']}* are trailing the *{race['first_place']}* by just *{race['gb']}* games!")
+
+    return [
         {
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "🏁 *Pennant Race Watch*"
+                "text": "\n".join(lines)
             }
-        }
+        },
+        {"type": "divider"}
     ]
-    
-    for race in races:
-        if race.get('is_tied'):
-            text = f"*{race['division']}*: The *{race['second_place']}* and *{race['first_place']}* are currently tied for first place!"
-        else:
-            text = f"*{race['division']}*: The *{race['second_place']}* are trailing the *{race['first_place']}* by just *{race['gb']}* games!"
-        blocks.append({
-            "type": "section",
-            "text": {
-                "type": "mrkdwn",
-                "text": text
-            }
-        })
-        
-    blocks.append({"type": "divider"})
-    return blocks
 
 def build_playoff_odds_blocks(odds_data):
     if not odds_data:
@@ -489,15 +536,21 @@ def post_daily_digest(blocks):
     if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
         print("Missing Slack configuration. Cannot post to Slack.")
         return
-        
+
     client = WebClient(token=SLACK_BOT_TOKEN)
-    
+
     try:
-        client.chat_postMessage(
-            channel=SLACK_CHANNEL_ID,
-            blocks=blocks,
-            text="📰 XFBL Daily Digest: Sim Complete!"
-        )
+        # Slack enforces a 50-block maximum per message; chunk if needed
+        chunk_size = 48
+        for idx in range(0, len(blocks), chunk_size):
+            chunk = blocks[idx:idx + chunk_size]
+            if chunk and chunk[-1].get("type") == "divider" and idx + chunk_size >= len(blocks):
+                chunk = chunk[:-1]
+            client.chat_postMessage(
+                channel=SLACK_CHANNEL_ID,
+                blocks=chunk,
+                text="📰 XFBL Daily Digest: Sim Complete!" if idx == 0 else "📰 XFBL Daily Digest (continued)"
+            )
         print("Successfully posted daily digest to Slack!")
     except SlackApiError as e:
         print(f"Error posting daily digest to Slack: {e.response['error']}")
@@ -533,7 +586,7 @@ def build_power_rankings_blocks(rankings):
         lines.append("_Big movers this sim:_")
         for r in big_movers:
             direction = "🔥 rising" if r["trend"] == "++" else "❄️ falling"
-            lines.append(f"• *{r['team']}* is {direction} (#{r['rank']})`")
+            lines.append(f"• *{r['team']}* is {direction} (#{r['rank']})")
 
     return [
         {
@@ -762,6 +815,18 @@ def trigger_daily_digest():
     except Exception:
         state = {}
 
+    # Record the current in-game date so handle_sim_complete can verify when the next sim's CSVs finish uploading
+    current_sim_dt = get_league_current_date(LEAGUE_URL)
+    current_sim_date_str = current_sim_dt.strftime("%Y-%m-%d")
+
+    def _save_state():
+        state["last_sim_date"] = current_sim_date_str
+        try:
+            with open(state_path, "w") as f:
+                json.dump(state, f, indent=2)
+        except Exception as e:
+            print(f"Warning: Could not save state: {e}")
+
     print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
     best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
 
@@ -775,6 +840,7 @@ def trigger_daily_digest():
         print("Offseason sim detected — posting detailed update, skipping rotation state.")
         print("Fetching offseason transactions & news...")
         offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        _save_state()
         all_blocks = build_offseason_blocks(offseason_data, is_spring_training=False)
         post_daily_digest(all_blocks)
         return
@@ -784,6 +850,7 @@ def trigger_daily_digest():
         print("Spring Training sim detected — posting spring update.")
         print("Fetching transactions & news...")
         offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        _save_state()
         all_blocks = build_offseason_blocks(offseason_data, is_spring_training=True)
         post_daily_digest(all_blocks)
         return
@@ -791,30 +858,26 @@ def trigger_daily_digest():
     # ── POSTSEASON ────────────────────────────────────────────────────────────
     if season_phase == "postseason":
         print("Postseason sim detected — posting playoff digest.")
-        headlines = get_headlines_and_milestones(LEAGUE_URL)
+        headlines = get_headlines_and_milestones(LEAGUE_URL, DAYS_BACK)
         notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
         all_blocks = build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
         # Save state but skip burning rotation state (oddities/trivia/analytics)
-        try:
-            with open(state_path, "w") as f:
-                json.dump(state, f, indent=2)
-        except Exception as e:
-            print(f"Warning: Could not save state: {e}")
+        _save_state()
         post_daily_digest(all_blocks)
         return
 
     # ── REGULAR SEASON ────────────────────────────────────────────────────────
     print(f"Fetching power rankings...")
-    power_rankings = get_power_rankings(LEAGUE_URL)
+    power_rankings = get_power_rankings(LEAGUE_URL, DAYS_BACK)
 
     print(f"Fetching headlines from StatsPlus recap...")
-    headlines = get_headlines_and_milestones(LEAGUE_URL)
+    headlines = get_headlines_and_milestones(LEAGUE_URL, DAYS_BACK)
 
     print(f"Fetching rotating sim analytics...")
     analytics_data = get_sim_analytics(LEAGUE_URL)
 
     print(f"Fetching streaks and season records...")
-    streak_callouts = get_streaks_and_records(LEAGUE_URL, state)
+    streak_callouts = get_streaks_and_records(LEAGUE_URL, state, DAYS_BACK)
 
     print(f"Fetching milestone countdowns...")
     milestones = get_milestone_countdowns(LEAGUE_URL)
@@ -848,11 +911,7 @@ def trigger_daily_digest():
     rough_outings = get_rough_outings(LEAGUE_URL, DAYS_BACK)
 
     # Save updated state (all functions above may have mutated state)
-    try:
-        with open(state_path, "w") as f:
-            json.dump(state, f, indent=2)
-    except Exception as e:
-        print(f"Warning: Could not save state: {e}")
+    _save_state()
 
     print("Building Daily Digest blocks...")
     performance_blocks = []
@@ -862,7 +921,7 @@ def trigger_daily_digest():
         performance_blocks.extend(build_performance_blocks(best_batter, "Batter of the Sim"))
 
     headlines_blocks = build_headlines_blocks(headlines) if headlines else []
-    analytics_blocks = build_analytics_blocks(analytics_data, streak_callouts, milestones) if analytics_data else []
+    analytics_blocks = build_analytics_blocks(analytics_data, streak_callouts, milestones) if (analytics_data or streak_callouts or milestones) else []
     oddities_blocks = build_api_oddities_blocks(api_oddities) if api_oddities else []
     notable_blocks = build_notable_games_blocks(notable_games) if notable_games else []
     races_blocks = build_division_races_blocks(races) if races else []
@@ -963,13 +1022,50 @@ def handle_sim_complete(message, say):
         print(f"Ignoring message from non-File Watcher bot: {bot_name}")
         return
 
+    if not _digest_lock.acquire(blocking=False):
+        print("⏳ A Daily Digest job is already waiting or running; ignoring duplicate trigger.")
+        return
+
     print(f"✅ MATCH FOUND: {message.get('text')}")
-    print("🚀 Detected League File update message! Waiting 3 minutes before scraping...")
-    
+    print(f"🚀 Detected League File update message! Waiting {SIM_WAIT_SECONDS} seconds before checking StatsPlus API...")
+
     def run_delayed_digest():
-        time.sleep(180)
-        trigger_daily_digest()
-        
+        import json
+        try:
+            state_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "state.json")
+            last_sim_date = None
+            try:
+                with open(state_path, "r") as f:
+                    last_sim_date = json.load(f).get("last_sim_date")
+            except Exception:
+                pass
+
+            time.sleep(SIM_WAIT_SECONDS)
+
+            # Verify that the StatsPlus CSV upload has actually advanced the in-game date
+            if last_sim_date:
+                max_retries = 15
+                retry_interval = 60
+                for attempt in range(1, max_retries + 1):
+                    api_date = get_league_current_date(LEAGUE_URL).strftime("%Y-%m-%d")
+                    if api_date != last_sim_date:
+                        if attempt > 1:
+                            print(f"✅ StatsPlus API date advanced from {last_sim_date} to {api_date}! Waiting 60s for CSV import to finish settling...")
+                            time.sleep(60)
+                        break
+                    print(
+                        f"⏳ StatsPlus API date is still {api_date} (same as last sim). "
+                        f"CSVs may still be uploading/processing — waiting {retry_interval}s "
+                        f"(attempt {attempt}/{max_retries})..."
+                    )
+                    time.sleep(retry_interval)
+                else:
+                    print(f"⚠️ StatsPlus API date remained {last_sim_date} after {max_retries} retries. Proceeding with digest anyway.")
+
+            trigger_daily_digest()
+        finally:
+            _digest_lock.release()
+
     thread = threading.Thread(target=run_delayed_digest)
     thread.start()
 
