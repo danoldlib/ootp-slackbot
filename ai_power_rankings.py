@@ -136,8 +136,10 @@ def fetch_statsplus_data(league_url, api_token):
 
 def generate_power_rankings(league_url="https://statsplus.net/xfbl"):
     """Fetches data and asks Gemini to generate power rankings."""
-    api_token = os.getenv("STATSPLUS_API_TOKEN")
-    gemini_key = os.getenv("GEMINI_API_KEY")
+    from dotenv import load_dotenv
+    load_dotenv(override=True)
+    api_token = os.getenv("STATSPLUS_API_TOKEN", "").strip().strip("'").strip('"')
+    gemini_key = os.getenv("GEMINI_API_KEY", "").strip().strip("'").strip('"')
     
     if not api_token:
         return "⚠️ Error: `STATSPLUS_API_TOKEN` not set in `.env`."

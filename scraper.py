@@ -5,7 +5,43 @@ import os
 from datetime import datetime, timedelta
 from dotenv import load_dotenv, set_key
 
-load_dotenv()
+load_dotenv(override=True)
+
+
+def _get_api_token():
+    """
+    Returns the current StatsPlus API token stripped of any whitespace or surrounding quotes.
+    """
+    return os.environ.get("STATSPLUS_API_TOKEN", "").strip().strip("'").strip('"')
+
+
+def _update_env_token_in_place(env_path, new_token):
+    """
+    Updates STATSPLUS_API_TOKEN in .env in-place without os.replace() so Docker
+    single-file bind mounts (./.env:/app/.env) never fail with EBUSY or add quotes.
+    """
+    try:
+        if os.path.exists(env_path):
+            with open(env_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+            found = False
+            new_lines = []
+            for line in lines:
+                if re.match(r"^\s*STATSPLUS_API_TOKEN\s*=", line):
+                    new_lines.append(f"STATSPLUS_API_TOKEN={new_token}\n")
+                    found = True
+                else:
+                    new_lines.append(line)
+            if not found:
+                if new_lines and not new_lines[-1].endswith("\n"):
+                    new_lines[-1] += "\n"
+                new_lines.append(f"STATSPLUS_API_TOKEN={new_token}\n")
+            with open(env_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+        else:
+            set_key(env_path, "STATSPLUS_API_TOKEN", new_token, quote_mode="never")
+    except Exception as e:
+        print(f"Warning: Could not update .env file in-place: {e}")
 
 
 def parse_ootp_date(date_str):
@@ -48,7 +84,11 @@ def refresh_statsplus_api_token(league_url="https://statsplus.net/xfbl"):
       - 'message': human-readable description
       - 'token': active token string
     """
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    # Always reload .env with override=True so manual runs (`docker exec ...`) or external
+    # .env edits override stale container creation-time environment variables.
+    env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
+    load_dotenv(dotenv_path=env_path, override=True)
+    token = _get_api_token()
     if not token:
         return {
             "status": "error",
@@ -62,19 +102,15 @@ def refresh_statsplus_api_token(league_url="https://statsplus.net/xfbl"):
         resp = requests.post(url, headers=headers, timeout=20)
         if resp.status_code == 200:
             data = resp.json()
-            new_token = data.get("token")
+            new_token = (data.get("token") or "").strip().strip("'").strip('"')
             expires = data.get("expires", "")
             rotated = data.get("rotated", False)
 
             if rotated and new_token and new_token != token:
                 # Update os.environ
                 os.environ["STATSPLUS_API_TOKEN"] = new_token
-                # Update .env file
-                env_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), ".env")
-                try:
-                    set_key(env_path, "STATSPLUS_API_TOKEN", new_token)
-                except Exception as e:
-                    print(f"Warning: Could not update .env file via set_key: {e}")
+                # Update .env file in-place (safe for Docker single-file bind mounts)
+                _update_env_token_in_place(env_path, new_token)
                 print(f"StatsPlus API token automatically rotated! Expires: {expires}")
                 return {
                     "status": "refreshed",
@@ -121,7 +157,7 @@ _API_CACHE = {
 }
 
 def _get_api_headers():
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     headers = {
         "User-Agent": "XFBL-SlackBot/2.0 (+https://statsplus.net/xfbl)"
     }
@@ -178,7 +214,7 @@ def get_cached_lgdata(league_url="https://statsplus.net/xfbl"):
     _ensure_cache_fresh(league_url)
     if _API_CACHE["lgdata"] is not None:
         return _API_CACHE["lgdata"]
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     url = f"{league_url.rstrip('/')}/api/lgdata/{token_param}"
     try:
@@ -192,7 +228,7 @@ def get_cached_lgdata(league_url="https://statsplus.net/xfbl"):
 
 def get_cached_players(league_url="https://statsplus.net/xfbl", active_only=False):
     _ensure_cache_fresh(league_url)
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     if active_only:
         if _API_CACHE["players_active"] is not None:
@@ -216,7 +252,7 @@ def get_cached_teams_csv(league_url="https://statsplus.net/xfbl"):
     _ensure_cache_fresh(league_url)
     if _API_CACHE["teams_csv"] is not None:
         return _API_CACHE["teams_csv"]
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     url = f"{league_url.rstrip('/')}/api/teams/{token_param}"
     rows = _fetch_csv_api(url)
@@ -226,7 +262,7 @@ def get_cached_teams_csv(league_url="https://statsplus.net/xfbl"):
 
 def get_cached_season_stats(league_url="https://statsplus.net/xfbl"):
     _ensure_cache_fresh(league_url)
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     if _API_CACHE["bat_season"] is None:
         bat_rows = _fetch_csv_api(f"{league_url.rstrip('/')}/api/playerbatstatsv2/{token_param}")
@@ -250,7 +286,7 @@ def get_cached_career_stats(league_url="https://statsplus.net/xfbl"):
     if _API_CACHE["bat_career"] is not None and _API_CACHE["pitch_career"] is not None:
         return _API_CACHE["bat_career"], _API_CACHE["pitch_career"]
 
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else "?"
     sep = "&" if token else ""
     current_year = current_date.year
@@ -316,7 +352,7 @@ def get_cached_atbats(league_url, cutoff_date, current_date):
     if key in _API_CACHE["atbats"]:
         return _API_CACHE["atbats"][key]
 
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     sep = "&" if token_param else "?"
     atbats_url = f"{league_url.rstrip('/')}/api/atbats/{token_param}{sep}start={start_str}&end={end_str}"
@@ -333,7 +369,7 @@ def get_cached_gamehistory(league_url, cutoff_date, current_date):
     if key in _API_CACHE["gamehistory"]:
         return _API_CACHE["gamehistory"][key]
 
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     sep = "&" if token_param else "?"
     gh_url = f"{league_url.rstrip('/')}/api/gamehistory/{token_param}{sep}start={start_str}&end={end_str}"
@@ -383,7 +419,7 @@ def get_league_current_date(league_url="https://statsplus.net/xfbl"):
     Fetches the exact in-game date from the /api/date/ endpoint.
     Falls back to scraping the homepage if unavailable.
     """
-    token = os.getenv("STATSPLUS_API_TOKEN", "")
+    token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     try:
         resp = requests.get(f"{league_url.rstrip('/')}/api/date/{token_param}", headers=_get_api_headers(), timeout=10)
@@ -947,7 +983,7 @@ def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl", days_b
 
     # ── 3. AUTHENTICATED /api/recap/ FALLBACK ─────────────────────────────────
     if not headlines:
-        token = os.getenv("STATSPLUS_API_TOKEN", "")
+        token = _get_api_token()
         token_param = f"?token={token}" if token else ""
         recap_url = f"{league_url.rstrip('/')}/api/recap/{token_param}"
         try:

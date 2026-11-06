@@ -21,8 +21,8 @@ from scraper import (
 )
 from ai_power_rankings import generate_power_rankings as generate_ai_power_rankings
 
-# Load environment variables
-load_dotenv()
+# Load environment variables (override=True ensures /app/.env wins over stale container startup env vars)
+load_dotenv(override=True)
 
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_APP_TOKEN = os.getenv("SLACK_APP_TOKEN")
