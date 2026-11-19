@@ -14,7 +14,7 @@ from scraper import (
     get_notable_games, get_api_oddities, get_sim_analytics,
     get_streaks_and_records, get_milestone_countdowns,
     get_season_phase, get_power_rankings, get_offseason_transactions,
-    get_offseason_data, get_playoff_odds,
+    get_offseason_data, get_playoff_odds, get_postseason_digest_data,
     get_regular_season_trades, evaluate_traded_players, get_injuries,
     get_sweeps_and_walkoffs, get_prospect_callups, get_rough_outings,
     refresh_statsplus_api_token, get_league_current_date
@@ -623,11 +623,16 @@ def build_power_rankings_blocks(rankings):
     ]
 
 
-def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games):
+def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games, playoff_data=None):
     """
-    Builds a postseason-specific digest. Focuses on performances and drama,
-    strips out regular-season analytics, oddities, and standings races.
+    Builds a postseason-specific digest featuring sim results, series scoreboard,
+    active/upcoming series previews (regular-season H2H, previous playoff matchups,
+    Pythagorean + Log5 predictions, and players to watch), top performers, and drama.
     """
+    window_note = ""
+    if playoff_data and playoff_data.get("window_str"):
+        window_note = f"\n_Sim window: *{playoff_data['window_str']}*_"
+
     blocks = [
         {
             "type": "header",
@@ -641,18 +646,68 @@ def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
             "type": "section",
             "text": {
                 "type": "mrkdwn",
-                "text": "_The regular season is over. Every game now is win-or-go-home. Let's see who's stepping up._"
+                "text": f"_The regular season is over. Every game now is win-or-go-home. Let's see who's stepping up._{window_note}"
             }
         },
         {"type": "divider"}
     ]
 
+    # 1. Playoff Results & Series Scoreboard from this sim
+    sim_results = playoff_data.get("sim_results", []) if playoff_data else []
+    if sim_results:
+        res_lines = ["🏟️ *Postseason Results & Series Scoreboard*"]
+        for g in sim_results:
+            pitch_parts = []
+            if g.get("wp"):
+                pitch_parts.append(f"W: {g['wp']}")
+            if g.get("lp"):
+                pitch_parts.append(f"L: {g['lp']}")
+            if g.get("sp"):
+                pitch_parts.append(f"S: {g['sp']}")
+            pitch_str = f" — {', '.join(pitch_parts)}" if pitch_parts else ""
+            series_str = f" (_{g['series_note']}_)" if g.get("series_note") else ""
+            box_str = f" (<{g['box_url']}|Box Score>)" if g.get("box_url") else ""
+            res_lines.append(
+                f"• *({g['date']})* *{g['winner_name']}* def. {g['loser_name']} *{g['score_str']}*{series_str}{pitch_str}{box_str}"
+            )
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "\n".join(res_lines)}
+        })
+        blocks.append({"type": "divider"})
+
+    # 2. Top Playoff Performers of the Sim
     if best_pitcher:
         blocks.extend(build_performance_blocks(best_pitcher, "Playoff Pitcher of the Sim"))
     if best_batter:
         blocks.extend(build_performance_blocks(best_batter, "Playoff Batter of the Sim"))
+
+    # 3. Active & Upcoming Playoff Series Previews, History & Predictions
+    active_matchups = playoff_data.get("active_matchups", []) if playoff_data else []
+    if active_matchups:
+        blocks.append({
+            "type": "section",
+            "text": {"type": "mrkdwn", "text": "⚔️ *Playoff Series Previews, History & Predictions*"}
+        })
+        for m in active_matchups:
+            t1, t2 = m["team_a"], m["team_b"]
+            rec_1 = f" ({t1['w']}-{t1['l']})" if (t1.get("w") or t1.get("l")) else ""
+            rec_2 = f" ({t2['w']}-{t2['l']})" if (t2.get("w") or t2.get("l")) else ""
+            lines = [
+                f"*{m['series_title']}: {t2['name']}{rec_2} vs {t1['name']}{rec_1}* — _{m['status_str']}_",
+                f"⚔️ *Season Series:* {m['h2h_str']}",
+                f"📜 *Postseason History:* {m['playoff_hist_str']}",
+                f"🔮 *Prediction:* {m['prediction_str']}",
+            ]
+            if m.get("watch_str"):
+                lines.append(f"👀 *Players to Watch:* {m['watch_str']}")
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n".join(lines)}
+            })
+        blocks.append({"type": "divider"})
+
     if headlines:
-        # Re-label headlines section for playoffs
         headlines_text = "\n".join([f"• {h}" for h in headlines])
         blocks.append({
             "type": "section",
@@ -811,9 +866,10 @@ def build_offseason_blocks(offseason_data, is_spring_training=False):
     return blocks
 
 
-def trigger_daily_digest():
+def trigger_daily_digest(days_back=None, start_date=None, end_date=None):
     import json
     import os
+    from datetime import datetime
 
     # ── CHECK & AUTO-REFRESH STATSPLUS API TOKEN ──────────────────────────────
     print("Checking StatsPlus API token status...")
@@ -845,16 +901,39 @@ def trigger_daily_digest():
     current_sim_dt = get_league_current_date(LEAGUE_URL)
     current_sim_date_str = current_sim_dt.strftime("%Y-%m-%d")
 
+    # Resolve effective lookback window (explicit CLI args > auto-detected from last_sim_date > DAYS_BACK)
+    end_dt = datetime.strptime(end_date, "%Y-%m-%d") if end_date else current_sim_dt
+    if start_date:
+        start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+        effective_days_back = max(1, (end_dt - start_dt).days)
+        print(f"Using explicit date window: {start_date} to {end_dt.strftime('%Y-%m-%d')} ({effective_days_back} days)")
+    elif days_back is not None:
+        effective_days_back = max(1, int(days_back))
+        print(f"Using explicit days_back override: {effective_days_back} days")
+    else:
+        effective_days_back = DAYS_BACK
+        last_sim_str = state.get("last_sim_date")
+        if last_sim_str:
+            try:
+                last_sim_dt = datetime.strptime(last_sim_str, "%Y-%m-%d")
+                diff_days = (current_sim_dt - last_sim_dt).days
+                if 0 < diff_days <= 14:
+                    effective_days_back = diff_days
+                    print(f"Auto-detected sim window of {effective_days_back} days from last_sim_date ({last_sim_str}).")
+            except Exception:
+                pass
+
     def _save_state():
-        state["last_sim_date"] = current_sim_date_str
+        if not end_date:
+            state["last_sim_date"] = current_sim_date_str
         try:
             with open(state_path, "w") as f:
                 json.dump(state, f, indent=2)
         except Exception as e:
             print(f"Warning: Could not save state: {e}")
 
-    print(f"Fetching best performances from StatsPlus ({DAYS_BACK} days back)...")
-    best_pitcher, best_batter = get_best_performances(LEAGUE_URL, DAYS_BACK)
+    print(f"Fetching best performances from StatsPlus ({effective_days_back} days back)...")
+    best_pitcher, best_batter = get_best_performances(LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date)
 
 
     print(f"Detecting season phase...")
@@ -865,7 +944,7 @@ def trigger_daily_digest():
     if season_phase == "offseason":
         print("Offseason sim detected — posting detailed update, skipping rotation state.")
         print("Fetching offseason transactions & news...")
-        offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        offseason_data = get_offseason_data(LEAGUE_URL, effective_days_back)
         _save_state()
         all_blocks = build_offseason_blocks(offseason_data, is_spring_training=False)
         post_daily_digest(all_blocks)
@@ -875,7 +954,7 @@ def trigger_daily_digest():
     if season_phase == "spring_training":
         print("Spring Training sim detected — posting spring update.")
         print("Fetching transactions & news...")
-        offseason_data = get_offseason_data(LEAGUE_URL, DAYS_BACK)
+        offseason_data = get_offseason_data(LEAGUE_URL, effective_days_back)
         _save_state()
         all_blocks = build_offseason_blocks(offseason_data, is_spring_training=True)
         post_daily_digest(all_blocks)
@@ -884,9 +963,21 @@ def trigger_daily_digest():
     # ── POSTSEASON ────────────────────────────────────────────────────────────
     if season_phase == "postseason":
         print("Postseason sim detected — posting playoff digest.")
-        headlines = get_headlines_and_milestones(LEAGUE_URL, DAYS_BACK)
-        notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
-        all_blocks = build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games)
+        best_pitcher, best_batter = get_best_performances(
+            LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date, postseason_only=True
+        )
+        playoff_data = get_postseason_digest_data(
+            LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date
+        )
+        headlines = get_headlines_and_milestones(
+            LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date
+        )
+        notable_games = get_notable_games(
+            LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date, postseason_only=True
+        )
+        all_blocks = build_postseason_blocks(
+            best_pitcher, best_batter, headlines, notable_games, playoff_data=playoff_data
+        )
         # Save state but skip burning rotation state (oddities/trivia/analytics)
         _save_state()
         post_daily_digest(all_blocks)
@@ -894,16 +985,16 @@ def trigger_daily_digest():
 
     # ── REGULAR SEASON ────────────────────────────────────────────────────────
     print(f"Fetching power rankings...")
-    power_rankings = get_power_rankings(LEAGUE_URL, DAYS_BACK)
+    power_rankings = get_power_rankings(LEAGUE_URL, effective_days_back)
 
     print(f"Fetching headlines from StatsPlus recap...")
-    headlines = get_headlines_and_milestones(LEAGUE_URL, DAYS_BACK)
+    headlines = get_headlines_and_milestones(LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date)
 
     print(f"Fetching rotating sim analytics...")
     analytics_data = get_sim_analytics(LEAGUE_URL)
 
     print(f"Fetching streaks and season records...")
-    streak_callouts = get_streaks_and_records(LEAGUE_URL, state, DAYS_BACK)
+    streak_callouts = get_streaks_and_records(LEAGUE_URL, state, effective_days_back)
 
     print(f"Fetching milestone countdowns...")
     milestones = get_milestone_countdowns(LEAGUE_URL)
@@ -912,7 +1003,7 @@ def trigger_daily_digest():
     api_oddities = get_api_oddities(LEAGUE_URL)
 
     print(f"Fetching notable/weird games...")
-    notable_games = get_notable_games(LEAGUE_URL, DAYS_BACK)
+    notable_games = get_notable_games(LEAGUE_URL, effective_days_back, start_date=start_date, end_date=end_date)
 
     print(f"Fetching close division races...")
     races = get_close_division_races(LEAGUE_URL)
@@ -921,20 +1012,20 @@ def trigger_daily_digest():
     playoff_odds = get_playoff_odds(LEAGUE_URL)
 
     print(f"Fetching regular season trades...")
-    trades = get_regular_season_trades(LEAGUE_URL, state, DAYS_BACK)
+    trades = get_regular_season_trades(LEAGUE_URL, state, effective_days_back)
     traded_eval = evaluate_traded_players(LEAGUE_URL, state)
     
     print(f"Fetching injuries...")
-    injuries = get_injuries(LEAGUE_URL, DAYS_BACK)
+    injuries = get_injuries(LEAGUE_URL, effective_days_back)
     
     print(f"Fetching sweeps and walkoffs...")
-    sweeps_and_walkoffs = get_sweeps_and_walkoffs(LEAGUE_URL, DAYS_BACK)
+    sweeps_and_walkoffs = get_sweeps_and_walkoffs(LEAGUE_URL, effective_days_back)
     
     print(f"Fetching prospect callups...")
-    prospects = get_prospect_callups(LEAGUE_URL, DAYS_BACK)
+    prospects = get_prospect_callups(LEAGUE_URL, effective_days_back)
     
     print(f"Fetching rough outings...")
-    rough_outings = get_rough_outings(LEAGUE_URL, DAYS_BACK)
+    rough_outings = get_rough_outings(LEAGUE_URL, effective_days_back)
 
     # Save updated state (all functions above may have mutated state)
     _save_state()
@@ -1141,14 +1232,22 @@ def main():
     handler.start()
 
 if __name__ == "__main__":
+    import argparse
     import sys
-    # Force unbuffered output so print statements appear immediately in docker exec
-    sys.stdout.reconfigure(line_buffering=True)
+    # Force unbuffered UTF-8 output so print statements appear immediately in docker exec and Windows consoles
+    sys.stdout.reconfigure(line_buffering=True, encoding="utf-8")
 
-    if "--manual" in sys.argv:
+    parser = argparse.ArgumentParser(description="XFBL OOTP Slack Bot")
+    parser.add_argument("--manual", action="store_true", help="Run Daily Digest immediately and exit")
+    parser.add_argument("--days", type=int, default=None, help="Lookback window in days (e.g., --days 2)")
+    parser.add_argument("--start", type=str, default=None, help="Explicit start date (YYYY-MM-DD)")
+    parser.add_argument("--end", type=str, default=None, help="Explicit end date (YYYY-MM-DD, defaults to current game date)")
+    args, _ = parser.parse_known_args()
+
+    if args.manual:
         print("🚀 Manual override detected. Running Daily Digest immediately...", flush=True)
         try:
-            trigger_daily_digest()
+            trigger_daily_digest(days_back=args.days, start_date=args.start, end_date=args.end)
         except Exception as e:
             import traceback
             print(f"❌ ERROR during manual digest: {e}", flush=True)

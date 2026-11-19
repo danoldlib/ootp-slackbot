@@ -154,6 +154,7 @@ _API_CACHE = {
     "pitch_career": None,
     "atbats": {},
     "gamehistory": {},
+    "gamehistory_all": None,
 }
 
 def _get_api_headers():
@@ -181,6 +182,7 @@ def _ensure_cache_fresh(league_url, current_date=None):
         _API_CACHE["pitch_career"] = None
         _API_CACHE["atbats"] = {}
         _API_CACHE["gamehistory"] = {}
+        _API_CACHE["gamehistory_all"] = None
 
 def _fetch_csv_api(url):
     import csv
@@ -361,22 +363,64 @@ def get_cached_atbats(league_url, cutoff_date, current_date):
         _API_CACHE["atbats"][key] = rows
     return rows
 
-def get_cached_gamehistory(league_url, cutoff_date, current_date):
-    _ensure_cache_fresh(league_url, current_date)
-    start_str = cutoff_date.strftime("%Y-%m-%d")
-    end_str = current_date.strftime("%Y-%m-%d")
-    key = (start_str, end_str)
-    if key in _API_CACHE["gamehistory"]:
-        return _API_CACHE["gamehistory"][key]
+def get_cached_gamehistory(league_url, cutoff_date=None, current_date=None, include_history=False):
+    ref_date = current_date or get_league_current_date(league_url)
+    _ensure_cache_fresh(league_url, ref_date)
+
+    # If full multi-year history is already cached, satisfy all requests in memory
+    if _API_CACHE["gamehistory_all"] is not None:
+        all_rows = _API_CACHE["gamehistory_all"]
+        if include_history or (cutoff_date is None and current_date is None):
+            return all_rows
+        start_str = cutoff_date.strftime("%Y-%m-%d") if cutoff_date else "0000-00-00"
+        end_str = ref_date.strftime("%Y-%m-%d")
+        return [r for r in all_rows if start_str <= r.get("date", "") <= end_str]
 
     token = _get_api_token()
     token_param = f"?token={token}" if token else ""
     sep = "&" if token_param else "?"
+
+    if include_history:
+        years_query = "&".join(f"year={y}" for y in range(ref_date.year - 9, ref_date.year + 1))
+        gh_url = f"{league_url.rstrip('/')}/api/gamehistory/{token_param}{sep}{years_query}"
+        rows = _fetch_csv_api(gh_url)
+        if rows:
+            _API_CACHE["gamehistory_all"] = rows
+        return rows
+
+    start_date = cutoff_date or (ref_date - timedelta(days=7))
+    start_str = start_date.strftime("%Y-%m-%d")
+    end_str = ref_date.strftime("%Y-%m-%d")
+    key = (start_str, end_str)
+    if key in _API_CACHE["gamehistory"]:
+        return _API_CACHE["gamehistory"][key]
+
     gh_url = f"{league_url.rstrip('/')}/api/gamehistory/{token_param}{sep}start={start_str}&end={end_str}"
     rows = _fetch_csv_api(gh_url)
     if rows:
         _API_CACHE["gamehistory"][key] = rows
     return rows
+
+
+def _resolve_sim_window(league_url, days_back=7, start_date=None, end_date=None):
+    """
+    Resolves (cutoff_date, current_date) as datetime objects from explicit dates or days_back.
+    """
+    if isinstance(end_date, str) and end_date:
+        current_date = datetime.strptime(end_date, "%Y-%m-%d")
+    elif isinstance(end_date, datetime):
+        current_date = end_date
+    else:
+        current_date = get_league_current_date(league_url)
+
+    if isinstance(start_date, str) and start_date:
+        cutoff_date = datetime.strptime(start_date, "%Y-%m-%d")
+    elif isinstance(start_date, datetime):
+        cutoff_date = start_date
+    else:
+        cutoff_date = current_date - timedelta(days=days_back)
+
+    return cutoff_date, current_date
 
 def _get_maps(league_url="https://statsplus.net/xfbl"):
     """
@@ -442,19 +486,18 @@ def get_league_current_date(league_url="https://statsplus.net/xfbl"):
 
     return datetime.now()
 
-def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
+def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7, start_date=None, end_date=None, postseason_only=False):
     """
     Fetches the highest ranked pitcher and batter performances within the sim window.
     Prefers using the StatsPlus API (/api/atbats/, /api/players/, /api/lgdata/) to avoid
     triggering 429 rate limits on HTML scraping. Falls back to HTML scraping if API data is unavailable.
     """
-    current_date = get_league_current_date(league_url)
-    cutoff_date = current_date - timedelta(days=days_back)
+    cutoff_date, current_date = _resolve_sim_window(league_url, days_back, start_date, end_date)
     print(f"Looking for performances between {cutoff_date.strftime('%Y-%m-%d')} and {current_date.strftime('%Y-%m-%d')}")
 
     # 1. Attempt API calculation first
     try:
-        best_p, best_b = get_best_performances_from_api(league_url, cutoff_date, current_date)
+        best_p, best_b = get_best_performances_from_api(league_url, cutoff_date, current_date, postseason_only=postseason_only)
         if best_p or best_b:
             return best_p, best_b
     except Exception as e:
@@ -470,7 +513,7 @@ def get_best_performances(league_url="https://statsplus.net/xfbl", days_back=7):
 
     return best_pitcher, best_batter
 
-def get_best_performances_from_api(league_url, cutoff_date, current_date):
+def get_best_performances_from_api(league_url, cutoff_date, current_date, postseason_only=False):
     """
     Calculates top batter and pitcher performances directly from cached /api/atbats/ and /api/lgdata/.
     """
@@ -480,6 +523,23 @@ def get_best_performances_from_api(league_url, cutoff_date, current_date):
     rows = get_cached_atbats(league_url, cutoff_date, current_date)
     if not rows:
         return None, None
+
+    # Determine allowed game types (restrict to postseason '3' if requested and present in window)
+    allowed_types = ('0', '3')
+    if postseason_only:
+        has_postseason = False
+        for r in rows:
+            if r.get('game_type') == '3':
+                gdate_str = r.get('date', '')
+                try:
+                    gdate = datetime.strptime(gdate_str, "%Y-%m-%d")
+                    if cutoff_date <= gdate <= current_date:
+                        has_postseason = True
+                        break
+                except Exception:
+                    continue
+        if has_postseason:
+            allowed_types = ('3',)
 
     # Track games and teams
     game_teams = defaultdict(set)
@@ -492,7 +552,7 @@ def get_best_performances_from_api(league_url, cutoff_date, current_date):
     # 1. Evaluate Batters (regular season '0' or postseason '3')
     batter_games = defaultdict(lambda: {'ab': 0, 'h': 0, 'd': 0, 't': 0, 'hr': 0, 'rbi': 0, 'r': 0, 'bb': 0, 'k': 0, 'date': '', 'team_id': '', 'game_id': ''})
     for r in rows:
-        if r.get('game_type') not in ('0', '3'):
+        if r.get('game_type') not in allowed_types:
             continue
         gdate_str = r.get('date', '')
         try:
@@ -564,7 +624,7 @@ def get_best_performances_from_api(league_url, cutoff_date, current_date):
     # 2. Evaluate Pitchers (regular season '0' or postseason '3')
     pitcher_games = defaultdict(lambda: {'bf': 0, 'h': 0, 'd': 0, 't': 0, 'hr': 0, 'rbi': 0, 'r': 0, 'bb': 0, 'k': 0, 'outs': 0, 'date': '', 'team_id': '', 'game_id': '', 'opp_id': ''})
     for r in rows:
-        if r.get('game_type') not in ('0', '3'):
+        if r.get('game_type') not in allowed_types:
             continue
         gdate_str = r.get('date', '')
         try:
@@ -718,7 +778,7 @@ def scrape_table_with_dates(url, cutoff_date, current_date, league_url, is_pitch
     return None
 
 
-def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl", days_back=7):
+def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl", days_back=7, start_date=None, end_date=None):
     """
     Detects career milestones reached this sim and rare feats/awards.
     1. Pure StatsPlus API calculation: compares multi-year career totals from
@@ -731,8 +791,7 @@ def get_headlines_and_milestones(league_url="https://statsplus.net/xfbl", days_b
     """
     from collections import defaultdict
 
-    current_date = get_league_current_date(league_url)
-    cutoff_date = current_date - timedelta(days=days_back)
+    cutoff_date, current_date = _resolve_sim_window(league_url, days_back, start_date, end_date)
     player_names, player_teams, team_abbr_map, _, _ = _get_maps(league_url)
 
     headlines = []
@@ -1435,33 +1494,50 @@ def get_playoff_odds(league_url="https://statsplus.net/xfbl"):
         "NL": {"bubble": nl_bubble, "contenders": nl_contenders},
     }
 
-def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
+def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7, start_date=None, end_date=None, postseason_only=False):
     """
     Scans for noteworthy/weird games:
     - Blowouts (margin of 10+ runs)
     - High-scoring affairs (combined score 20+)
     - Individual players hitting 3+ HRs in a game
+    - In postseason mode: also highlights extra-inning games and 1-run thrillers
     Uses cached /api/atbats/, /api/players/, and /api/lgdata/ first, falling back to HTML scraping.
     """
     from urllib.parse import urljoin
     from collections import defaultdict
 
-    current_date = get_league_current_date(league_url)
-    cutoff_date = current_date - timedelta(days=days_back)
+    cutoff_date, current_date = _resolve_sim_window(league_url, days_back, start_date, end_date)
 
     # Attempt API calculation first using cached data
     try:
         rows = get_cached_atbats(league_url, cutoff_date, current_date)
         if rows:
+            allowed_types = ('0', '3')
+            if postseason_only:
+                has_postseason = False
+                for r in rows:
+                    if r.get('game_type') == '3':
+                        gdate_str = r.get('date', '')
+                        try:
+                            gdate = datetime.strptime(gdate_str, "%Y-%m-%d")
+                            if cutoff_date <= gdate <= current_date:
+                                has_postseason = True
+                                break
+                        except Exception:
+                            continue
+                if has_postseason:
+                    allowed_types = ('3',)
+
             player_names, _, team_abbr_map, _, _ = _get_maps(league_url)
             notable = []
             seen_games = set()
 
             game_runs = defaultdict(lambda: defaultdict(int))
+            game_max_inning = defaultdict(int)
             player_game_hrs = defaultdict(int)
 
             for r in rows:
-                if r.get('game_type') not in ('0', '3'):
+                if r.get('game_type') not in allowed_types:
                     continue
                 gdate_str = r.get('date', '')
                 try:
@@ -1475,6 +1551,9 @@ def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
                 tid = r.get('team_id')
                 pid = r.get('player_id')
                 game_runs[gid][tid] += int(r.get('r') or 0)
+                inn = int(r.get('inning') or 0)
+                if inn > game_max_inning[gid]:
+                    game_max_inning[gid] = inn
 
                 if r.get('result') == '9':  # Home run
                     player_game_hrs[(pid, gid, tid)] += 1
@@ -1493,7 +1572,7 @@ def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
                         "box_url": box_url
                     })
 
-            # Check for blowouts and slugfests
+            # Check for blowouts, slugfests, extra-inning, and 1-run playoff thrillers
             for gid, runs_by_team in game_runs.items():
                 if len(runs_by_team) == 2 and gid not in seen_games:
                     seen_games.add(gid)
@@ -1504,6 +1583,7 @@ def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
                     abbr2 = team_abbr_map.get(t2, '???')
                     margin = abs(r1 - r2)
                     total = r1 + r2
+                    max_inn = game_max_inning.get(gid, 9)
                     box_url = f"{league_url.rstrip('/')}/reports/news/html/box_scores/game_box_{gid}.html"
 
                     if margin >= 10:
@@ -1516,6 +1596,18 @@ def get_notable_games(league_url="https://statsplus.net/xfbl", days_back=7):
                         notable.append({
                             "type": "slugfest",
                             "text": f"⚡ *Run Fest!* {abbr1} vs {abbr2} combined for *{total} runs* in a wild {r1}-{r2} affair.",
+                            "box_url": box_url
+                        })
+                    elif postseason_only and max_inn >= 10:
+                        notable.append({
+                            "type": "extra_innings",
+                            "text": f"⏳ *Extra-Inning Drama!* {abbr1} and {abbr2} battled *{max_inn} innings* ({r1}-{r2}).",
+                            "box_url": box_url
+                        })
+                    elif postseason_only and margin == 1:
+                        notable.append({
+                            "type": "one_run",
+                            "text": f"🔥 *Playoff Thriller!* {abbr1} vs {abbr2} was decided by a single run (*{r1}-{r2}*).",
                             "box_url": box_url
                         })
 
@@ -3043,6 +3135,907 @@ def get_rough_outings(league_url="https://statsplus.net/xfbl", days_back=7):
         )
 
     return rough
+
+def _resolve_scores_box_links(league_url, target_dates):
+    """
+    Fetches OOTP static scoreboard pages (league_100_scores_YYYY_MM_DD.html) for the
+    given dates to extract exact game box score URLs and game recaps.
+    Returns:
+      - box_map: dict mapping (date_str, away_token, home_token) -> {box_url, headline, wp, lp, sp, away_name, home_name, away_r, home_r}
+      - parsed_games: list of game dicts for HTML fallback when /api/gamehistory/ is unavailable
+    """
+    from urllib.parse import urljoin
+
+    box_map = {}
+    parsed_games = []
+    base_scores = f"{league_url.rstrip('/')}/reports/news/html/leagues/"
+
+    for d_str in sorted(set(target_dates)):
+        ymd_under = d_str.replace("-", "_")
+        url = f"{base_scores}league_100_scores_{ymd_under}.html"
+        try:
+            resp = requests.get(url, headers=_get_api_headers(), timeout=12)
+            if resp.status_code != 200:
+                continue
+            soup = BeautifulSoup(resp.text, "html.parser")
+            seen_hrefs = set()
+            for a in soup.find_all("a"):
+                href = a.get("href") or ""
+                if "box_scores/game_box_" not in href or href in seen_hrefs:
+                    continue
+                seen_hrefs.add(href)
+                box_url = urljoin(url, href)
+                card = a.find_parent("table")
+                if not card:
+                    continue
+
+                # Extract non-nested linescore team rows (with team link + R H E)
+                team_scores = []
+                for tr in card.find_all("tr"):
+                    if tr.find("table") is not None:
+                        continue
+                    cells = [td.get_text(" ", strip=True) for td in tr.find_all("td")]
+                    if len(cells) >= 12 and not any(c in ("R", "H", "E") for c in cells) and re.fullmatch(r"\d+", cells[-3]):
+                        t_name = cells[0].strip()
+                        t_link = tr.find("a", href=re.compile(r"teams/team_(\d+)\.html"))
+                        t_id = re.search(r"team_(\d+)\.html", t_link["href"]).group(1) if t_link else ""
+                        try:
+                            runs = int(cells[-3])
+                            team_scores.append((t_id, t_name, runs))
+                        except ValueError:
+                            pass
+
+                if len(team_scores) < 2:
+                    continue
+                away_tid, away_city, away_r = team_scores[0]
+                home_tid, home_city, home_r = team_scores[1]
+
+                # Extract decision pitchers and headline from non-nested text rows in card
+                headline = ""
+                wp_str, lp_str, sp_str = "", "", ""
+                for tr in card.find_all("tr"):
+                    if tr.find("table") is not None:
+                        continue
+                    txt = re.sub(r"\s+", " ", tr.get_text(" ", strip=True)).strip()
+                    if not txt or "Box Score" in txt:
+                        continue
+                    if "W:" in txt and "L:" in txt:
+                        m_w = re.search(r"W:\s*([^\(]+?\([^)]+\))", txt)
+                        m_l = re.search(r"L:\s*([^\(]+?\([^)]+\))", txt)
+                        m_s = re.search(r"S:\s*([^\(]+?\([^)]+\))", txt)
+                        wp_str = m_w.group(1).strip() if m_w else ""
+                        lp_str = m_l.group(1).strip() if m_l else ""
+                        sp_str = m_s.group(1).strip() if m_s else ""
+                        pre = txt.split("W:")[0].strip()
+                        if pre and not pre.startswith(("American League", "National League")):
+                            headline = pre
+                    elif len(txt) > 10 and not any(tok in txt for tok in ("HR -", "R H E")) and not re.match(r"^(?:[A-Za-z.\s]+)\s+\d+", txt):
+                        if not txt.startswith(("American League", "National League")):
+                            headline = txt
+
+                info = {
+                    "date": d_str,
+                    "away_tid": away_tid,
+                    "home_tid": home_tid,
+                    "away_city": away_city,
+                    "home_city": home_city,
+                    "away_r": away_r,
+                    "home_r": home_r,
+                    "headline": headline,
+                    "wp": wp_str,
+                    "lp": lp_str,
+                    "sp": sp_str,
+                    "box_url": box_url,
+                }
+                box_map[(d_str, away_tid or away_city.lower(), home_tid or home_city.lower())] = info
+                parsed_games.append(info)
+        except Exception as e:
+            print(f"Note: Could not parse scoreboard for {d_str}: {e}")
+
+    return box_map, parsed_games
+
+
+def _parse_standings_html(league_url):
+    """
+    Parses league_100_standings.html as a fallback/supplement to /api/lgdata/
+    returning team records and Pythagorean expectations keyed by full team name.
+    """
+    standings_by_name = {}
+    url = f"{league_url.rstrip('/')}/reports/news/html/leagues/league_100_standings.html"
+    try:
+        resp = requests.get(url, headers=_get_api_headers(), timeout=12)
+        if resp.status_code != 200:
+            return standings_by_name
+        soup = BeautifulSoup(resp.text, "html.parser")
+        current_sl = None
+        for tbl in soup.find_all("table"):
+            for tr in tbl.find_all("tr"):
+                cols = [td.get_text(" ", strip=True) for td in tr.find_all(["th", "td"])]
+                if not cols:
+                    continue
+                first_upper = cols[0].upper()
+                if "AMERICAN LEAGUE" in first_upper:
+                    current_sl = 0
+                    continue
+                if "NATIONAL LEAGUE" in first_upper:
+                    current_sl = 1
+                    continue
+                if len(cols) >= 7 and cols[0] != "Team" and re.fullmatch(r"\d+", cols[1]) and re.fullmatch(r"\d+", cols[2]):
+                    tname = cols[0].strip()
+                    if tname in standings_by_name:
+                        continue
+                    w = int(cols[1])
+                    l = int(cols[2])
+                    pyth_pct = None
+                    pyth_m = re.match(r"(\d+)-(\d+)", cols[5])
+                    if pyth_m:
+                        pw, pl = int(pyth_m.group(1)), int(pyth_m.group(2))
+                        if pw + pl > 0:
+                            pyth_pct = pw / (pw + pl)
+                    standings_by_name[tname] = {
+                        "w": w,
+                        "l": l,
+                        "pct": w / max(w + l, 1),
+                        "pyth_pct": pyth_pct,
+                        "sl_id": current_sl,
+                    }
+    except Exception as e:
+        print(f"Note: Could not parse standings HTML: {e}")
+    return standings_by_name
+
+
+def _parse_team_vs_team_html(league_url):
+    """
+    Parses league_100_team_vs_team.html returning dict (team_a_full, team_b_full) -> (w_a, l_a).
+    """
+    h2h = {}
+    url = f"{league_url.rstrip('/')}/reports/news/html/leagues/league_100_team_vs_team.html"
+    try:
+        resp = requests.get(url, headers=_get_api_headers(), timeout=12)
+        if resp.status_code != 200:
+            return h2h
+        soup = BeautifulSoup(resp.text, "html.parser")
+        for tbl in soup.find_all("table"):
+            rows = tbl.find_all("tr")
+            if not rows:
+                continue
+            hdr = [c.get_text(" ", strip=True) for c in rows[0].find_all(["th", "td"])]
+            if len(hdr) == 2 and hdr[1].lower() == "record":
+                base_team = hdr[0].strip()
+                for tr in rows[1:]:
+                    cols = [c.get_text(" ", strip=True) for c in tr.find_all("td")]
+                    if len(cols) == 2:
+                        opp_team = cols[0].strip()
+                        m = re.match(r"(\d+)-(\d+)", cols[1].strip())
+                        if m:
+                            h2h[(base_team, opp_team)] = (int(m.group(1)), int(m.group(2)))
+    except Exception as e:
+        print(f"Note: Could not parse team vs team HTML: {e}")
+    return h2h
+
+
+def _parse_upcoming_playoff_grid(league_url, from_date):
+    """
+    Parses league_100_schedule_grid.html for scheduled games on or after from_date.
+    Returns list of dicts: {date, away_abbr, home_abbr}.
+    """
+    scheduled = []
+    url = f"{league_url.rstrip('/')}/reports/news/html/leagues/league_100_schedule_grid.html"
+    try:
+        resp = requests.get(url, headers=_get_api_headers(), timeout=12)
+        if resp.status_code != 200:
+            return scheduled
+        soup = BeautifulSoup(resp.text, "html.parser")
+        col_teams = None
+        seen_games = set()
+
+        for tr in soup.find_all("tr"):
+            cells = tr.find_all(["th", "td"])
+            if len(cells) < 3:
+                continue
+            texts = [c.get_text(strip=True) for c in cells]
+            if texts[0] == "M" and texts[1] == "D":
+                col_teams = texts
+                continue
+            if not col_teams:
+                continue
+            if not (re.fullmatch(r"\d+", texts[0]) and re.fullmatch(r"\d+", texts[1])):
+                continue
+
+            month, day = int(texts[0]), int(texts[1])
+            try:
+                gdate = datetime(from_date.year, month, day)
+            except ValueError:
+                continue
+            if gdate < from_date:
+                continue
+
+            gdate_str = gdate.strftime("%Y-%m-%d")
+            for idx in range(2, min(len(cells), len(col_teams))):
+                opp_abbr = texts[idx]
+                if not opp_abbr:
+                    continue
+                col_abbr = col_teams[idx]
+                cls = cells[idx].get("class") or []
+                if "gh" in cls:
+                    away_abbr, home_abbr = opp_abbr, col_abbr
+                elif "ga" in cls:
+                    away_abbr, home_abbr = col_abbr, opp_abbr
+                else:
+                    continue
+
+                gkey = (gdate_str, away_abbr, home_abbr)
+                if gkey not in seen_games:
+                    seen_games.add(gkey)
+                    scheduled.append({
+                        "date": gdate_str,
+                        "away_abbr": away_abbr,
+                        "home_abbr": home_abbr,
+                    })
+    except Exception as e:
+        print(f"Error parsing schedule grid HTML: {e}")
+
+    return scheduled
+
+
+def _predict_series(prob_a_neutral, wa, wb, upcoming_a_is_home, best_of):
+    """
+    Computes exact series win probability and most likely total game length
+    using Log5 + home-field adjustment (+0.035) and dynamic programming.
+    Returns (predicted_winner_is_a, win_prob_pct, likely_total_games).
+    """
+    from collections import defaultdict
+
+    target = (best_of // 2) + 1
+    rem_needed_a = max(0, target - wa)
+    rem_needed_b = max(0, target - wb)
+    if rem_needed_a == 0:
+        return True, 100.0, wa + wb
+    if rem_needed_b == 0:
+        return False, 100.0, wa + wb
+
+    max_rem = rem_needed_a + rem_needed_b - 1
+    home_flags = list(upcoming_a_is_home)
+    # Pad missing home/away slots with alternating 2-3-2 / 2-2-1 default pattern if needed
+    default_pattern = [True, True, False, False, False, True, True] if best_of >= 7 else [True, True, False, False, True]
+    while len(home_flags) < max_rem:
+        idx = len(home_flags)
+        home_flags.append(default_pattern[idx % len(default_pattern)])
+
+    win_dist_a = defaultdict(float)
+    win_dist_b = defaultdict(float)
+
+    # Exact DP over (wins_a, wins_b) by remaining step
+    states = {(wa, wb): 1.0}
+    for step in range(max_rem):
+        next_states = defaultdict(float)
+        a_home = home_flags[step]
+        p_a = min(0.92, max(0.08, prob_a_neutral + (0.035 if a_home else -0.035)))
+        for (sa, sb), prob in states.items():
+            # If A wins this game
+            if sa + 1 >= target:
+                win_dist_a[sa + 1 + sb] += prob * p_a
+            else:
+                next_states[(sa + 1, sb)] += prob * p_a
+            # If B wins this game
+            if sb + 1 >= target:
+                win_dist_b[sa + sb + 1] += prob * (1.0 - p_a)
+            else:
+                next_states[(sa, sb + 1)] += prob * (1.0 - p_a)
+        states = next_states
+
+    prob_a_series = sum(win_dist_a.values())
+    prob_b_series = sum(win_dist_b.values())
+    if prob_a_series >= prob_b_series:
+        likely_games = max(win_dist_a.items(), key=lambda x: x[1])[0] if win_dist_a else best_of
+        return True, round(prob_a_series * 100.0, 1), likely_games
+    else:
+        likely_games = max(win_dist_b.items(), key=lambda x: x[1])[0] if win_dist_b else best_of
+        return False, round(prob_b_series * 100.0, 1), likely_games
+
+
+def _abbr_match_key(abbr):
+    aliases = {
+        "MIL": "MLW", "WAS": "WSH", "LAA": "ANA", "MIA": "FLA", "CWS": "CHW"
+    }
+    a = abbr.upper().strip()
+    return aliases.get(a, a)
+
+
+def get_postseason_digest_data(league_url="https://statsplus.net/xfbl", days_back=7, start_date=None, end_date=None):
+    """
+    Builds rich postseason digest data combining StatsPlus API (/api/gamehistory/,
+    /api/lgdata/, /api/playerbatstatsv2/, /api/playerpitchstatsv2/, /api/atbats/)
+    with OOTP HTML schedule/standings/scoreboard context:
+      - sim_results: playoff games completed in the sim window with series tally & clinchers
+      - active_matchups: active/upcoming playoff series previews containing:
+          * Regular season H2H
+          * Previous playoff matchups between the franchises
+          * Pythagorean + Log5 series win prediction & predicted length
+          * Top Players to Watch (regular season stars + October hot bats/arms)
+    """
+    from collections import defaultdict
+
+    cutoff_date, current_date = _resolve_sim_window(league_url, days_back, start_date, end_date)
+    start_str = cutoff_date.strftime("%Y-%m-%d")
+    end_str = current_date.strftime("%Y-%m-%d")
+    window_str = f"{cutoff_date.strftime('%b %d')} – {current_date.strftime('%b %d, %Y')}"
+
+    lgdata = get_cached_lgdata(league_url)
+    player_names, _, team_abbr_map, team_full_map, primary_lid = _get_maps(league_url)
+    bat_rows, pitch_rows = get_cached_season_stats(league_url)
+    standings_html = _parse_standings_html(league_url)
+
+    AL_ABBRS = {"BAL", "BOS", "NYY", "TOR", "TB", "CWS", "CLE", "DET", "KC", "MIN", "ANA", "LAA", "OAK", "TEX", "SEA"}
+
+    # Build unified team context keyed by canonical team ID (or abbr if lgdata empty)
+    team_info = {}       # key -> {key, tid, name, abbr, city, w, l, pct, pyth_pct, sl_id, rs, ra}
+    abbr_to_key = {}     # upper abbr / canonical alias -> key
+    name_to_key = {}     # lowercase full name & city -> key
+
+    # Compute RS/RA from season batting/pitching API if available
+    api_rs = defaultdict(int)
+    api_ra = defaultdict(int)
+    for r in bat_rows:
+        if r.get("split_id") == "1" and r.get("level_id", "1") == "1":
+            tid = str(r.get("team_id", "")).strip()
+            if tid:
+                api_rs[tid] += int(r.get("r") or 0)
+    for r in pitch_rows:
+        if r.get("split_id") == "1" and r.get("level_id", "1") == "1":
+            tid = str(r.get("team_id", "")).strip()
+            if tid:
+                api_ra[tid] += int(r.get("r") or 0)
+
+    standings_api = {str(st.get("team_id")): st for st in lgdata.get("standings", [])}
+
+    for t in lgdata.get("teams", []):
+        if t.get("league_id") != primary_lid:
+            continue
+        tid = str(t.get("team_id", "")).strip()
+        city = t.get("name", "").strip()
+        nick = t.get("nickname", "").strip()
+        full_name = f"{city} {nick}".strip()
+        abbr = t.get("abbr", "").strip()
+        sl_id = t.get("sub_league_id", 0 if abbr in AL_ABBRS else 1)
+
+        st = standings_api.get(tid, {})
+        html_st = standings_html.get(full_name, {})
+        w = int(st.get("w") or html_st.get("w") or 0)
+        l = int(st.get("l") or html_st.get("l") or 0)
+        actual_pct = float(st.get("pct") or html_st.get("pct") or (w / max(w + l, 1)))
+        rs = api_rs.get(tid, 0)
+        ra = api_ra.get(tid, 0)
+        if rs > 0 and ra > 0:
+            pyth_pct = (rs ** 1.83) / ((rs ** 1.83) + (ra ** 1.83))
+        elif html_st.get("pyth_pct") is not None:
+            pyth_pct = html_st["pyth_pct"]
+        else:
+            pyth_pct = actual_pct
+
+        info = {
+            "key": tid,
+            "tid": tid,
+            "name": full_name,
+            "abbr": abbr,
+            "city": city,
+            "nickname": nick,
+            "w": w,
+            "l": l,
+            "pct": actual_pct,
+            "pyth_pct": pyth_pct,
+            "sl_id": sl_id,
+        }
+        team_info[tid] = info
+        if abbr:
+            abbr_to_key[abbr.upper()] = tid
+            abbr_to_key[_abbr_match_key(abbr)] = tid
+        if full_name:
+            name_to_key[full_name.lower()] = tid
+        if nick:
+            name_to_key[nick.lower()] = tid
+        if city:
+            name_to_key[city.lower()] = tid
+
+    # Supplement from TEAM_MAPPING & standings_html if lgdata was empty
+    if not team_info:
+        # Handle "WSH"/"WAS", "MLW"/"MIL" cleanly without duplicate nicknames
+        canonical_abbrs = {
+            "ANA": "Anaheim Angels", "ARI": "Arizona Diamondbacks", "ATL": "Atlanta Braves",
+            "BAL": "Baltimore Orioles", "BOS": "Boston Red Sox", "CWS": "Chicago White Sox",
+            "CHC": "Chicago Cubs", "CIN": "Cincinnati Reds", "CLE": "Cleveland Indians",
+            "COL": "Colorado Rockies", "DET": "Detroit Tigers", "FLA": "Florida Marlins",
+            "HOU": "Houston Astros", "KC": "Kansas City Royals", "LAD": "Los Angeles Dodgers",
+            "MLW": "Milwaukee Brewers", "MIN": "Minnesota Twins", "NYM": "New York Mets",
+            "NYY": "New York Yankees", "OAK": "Oakland Athletics", "PHI": "Philadelphia Phillies",
+            "PIT": "Pittsburgh Pirates", "SD": "San Diego Padres", "SF": "San Francisco Giants",
+            "SEA": "Seattle Mariners", "STL": "St. Louis Cardinals", "TB": "Tampa Bay Devil Rays",
+            "TEX": "Texas Rangers", "TOR": "Toronto Blue Jays", "WSH": "Washington Nationals",
+        }
+        for abbr, full_name in canonical_abbrs.items():
+            html_st = standings_html.get(full_name, {})
+            w = html_st.get("w", 0)
+            l = html_st.get("l", 0)
+            pct = html_st.get("pct", 0.5)
+            pyth_pct = html_st.get("pyth_pct") or pct
+            sl_id = html_st.get("sl_id")
+            if sl_id is None:
+                sl_id = 0 if abbr in AL_ABBRS else 1
+            parts = full_name.rsplit(" ", 1)
+            city = " ".join(full_name.split()[:2]) if full_name.startswith(("New York", "Los Angeles", "San ", "St. ", "Tampa Bay", "Kansas City")) else full_name.split()[0]
+            nick = parts[-1]
+            info = {
+                "key": abbr,
+                "tid": "",
+                "name": full_name,
+                "abbr": abbr,
+                "city": city,
+                "nickname": nick,
+                "w": w,
+                "l": l,
+                "pct": pct,
+                "pyth_pct": pyth_pct,
+                "sl_id": sl_id,
+            }
+            team_info[abbr] = info
+            abbr_to_key[abbr] = abbr
+            abbr_to_key[_abbr_match_key(abbr)] = abbr
+            name_to_key[full_name.lower()] = abbr
+            name_to_key[nick.lower()] = abbr
+            if city.lower() not in name_to_key:
+                name_to_key[city.lower()] = abbr
+
+    def _resolve_team_key(tok):
+        if not tok:
+            return None
+        t = str(tok).strip()
+        if t in team_info:
+            return t
+        if t.upper() in abbr_to_key:
+            return abbr_to_key[t.upper()]
+        if _abbr_match_key(t) in abbr_to_key:
+            return abbr_to_key[_abbr_match_key(t)]
+        tl = t.lower()
+        if tl in name_to_key:
+            return name_to_key[tl]
+        for kname, key in name_to_key.items():
+            if len(tl) >= 4 and (tl == kname or kname.startswith(tl + " ")):
+                return key
+        return None
+
+    # ── 1. Multi-year GameHistory ─────────────────────────────────────────────
+    all_gh = get_cached_gamehistory(league_url, cutoff_date, current_date, include_history=True)
+    curr_year_str = str(current_date.year)
+
+    curr_year_playoffs = [
+        g for g in all_gh
+        if g.get("game_type") == "3" and g.get("played") == "1" and g.get("date", "").startswith(curr_year_str)
+    ]
+    curr_year_playoffs.sort(key=lambda g: (g.get("date", ""), int(g.get("game_id") or 0)))
+
+    # Group current year's playoff games into contiguous series chunks (gap <= 10 days)
+    curr_series_by_pair = defaultdict(list)
+    for g in curr_year_playoffs:
+        ka = _resolve_team_key(g.get("away_team"))
+        kh = _resolve_team_key(g.get("home_team"))
+        if not ka or not kh:
+            continue
+        pair = frozenset({ka, kh})
+        if not curr_series_by_pair[pair]:
+            curr_series_by_pair[pair].append([g])
+        else:
+            prev_dt = datetime.strptime(curr_series_by_pair[pair][-1][-1]["date"], "%Y-%m-%d")
+            cur_dt = datetime.strptime(g["date"], "%Y-%m-%d")
+            if (cur_dt - prev_dt).days > 10:
+                curr_series_by_pair[pair].append([g])
+            else:
+                curr_series_by_pair[pair][-1].append(g)
+
+    # ── 2. Parse upcoming playoff schedule grid (>= current_date) ─────────────
+    upcoming_grid = _parse_upcoming_playoff_grid(league_url, current_date)
+    upcoming_by_pair = defaultdict(list)
+    for sg in upcoming_grid:
+        ka = _resolve_team_key(sg["away_abbr"])
+        kh = _resolve_team_key(sg["home_abbr"])
+        if ka and kh and ka != kh:
+            upcoming_by_pair[frozenset({ka, kh})].append({
+                "date": sg["date"],
+                "away_key": ka,
+                "home_key": kh,
+            })
+
+    # Determine which dates need OOTP scoreboard HTML (for exact box_url & HTML fallback)
+    sim_dates = []
+    d_cursor = cutoff_date
+    while d_cursor <= current_date:
+        sim_dates.append(d_cursor.strftime("%Y-%m-%d"))
+        d_cursor += timedelta(days=1)
+    box_map, html_scores_games = _resolve_scores_box_links(league_url, sim_dates)
+
+    # Helper to find matching box score link from scoreboard HTML
+    def _find_box_info(gdate_str, away_key, home_key):
+        a_info = team_info.get(away_key, {})
+        h_info = team_info.get(home_key, {})
+        a_city = a_info.get("city", "").lower()
+        h_city = h_info.get("city", "").lower()
+        for (bd, ba, bh), info in box_map.items():
+            if bd != gdate_str:
+                continue
+            if (info.get("away_tid") == away_key and info.get("home_tid") == home_key) or (ba == a_city and bh == h_city):
+                return info
+        return {}
+
+    # ── 3. Sim Playoff Results & Series Scoreboard ────────────────────────────
+    sim_results = []
+    if curr_year_playoffs:
+        for g in curr_year_playoffs:
+            gdate = g.get("date", "")
+            if not (start_str <= gdate <= end_str):
+                continue
+            ka = _resolve_team_key(g.get("away_team"))
+            kh = _resolve_team_key(g.get("home_team"))
+            if not ka or not kh:
+                continue
+            r_away = int(g.get("runs0") or 0)
+            r_home = int(g.get("runs1") or 0)
+            winner_k = ka if r_away > r_home else kh
+            loser_k = kh if winner_k == ka else ka
+            w_score, l_score = max(r_away, r_home), min(r_away, r_home)
+
+            # Series context after this game
+            pair = frozenset({ka, kh})
+            latest_chunk = curr_series_by_pair[pair][-1]
+            wins_map = defaultdict(int)
+            for cg in latest_chunk:
+                if cg.get("date", "") <= gdate:
+                    cka = _resolve_team_key(cg.get("away_team"))
+                    ckh = _resolve_team_key(cg.get("home_team"))
+                    cw = cka if int(cg.get("runs0") or 0) > int(cg.get("runs1") or 0) else ckh
+                    wins_map[cw] += 1
+
+            has_upcoming = len(upcoming_by_pair.get(pair, [])) > 0
+            w_cnt, l_cnt = wins_map[winner_k], wins_map[loser_k]
+            if not has_upcoming and w_cnt > l_cnt:
+                if len(latest_chunk) == 1:
+                    series_note = f"{team_info[winner_k]['abbr']} advances"
+                else:
+                    series_note = f"{team_info[winner_k]['abbr']} wins series {w_cnt}-{l_cnt}"
+            else:
+                series_note = f"Series tied {w_cnt}-{l_cnt}" if w_cnt == l_cnt else f"{team_info[winner_k]['abbr']} leads {w_cnt}-{l_cnt}"
+
+            wp_name = g.get("winning_pitcher_name") or player_names.get(g.get("winning_pitcher", ""), "")
+            lp_name = g.get("losing_pitcher_name") or player_names.get(g.get("losing_pitcher", ""), "")
+            sp_name = g.get("save_pitcher_name") or player_names.get(g.get("save_pitcher", ""), "")
+            box_info = _find_box_info(gdate, ka, kh)
+
+            sim_results.append({
+                "date": gdate,
+                "winner_name": team_info[winner_k]["name"],
+                "winner_abbr": team_info[winner_k]["abbr"],
+                "loser_name": team_info[loser_k]["name"],
+                "loser_abbr": team_info[loser_k]["abbr"],
+                "score_str": f"{w_score}-{l_score}",
+                "away_abbr": team_info[ka]["abbr"],
+                "home_abbr": team_info[kh]["abbr"],
+                "wp": wp_name,
+                "lp": lp_name,
+                "sp": sp_name,
+                "series_note": series_note,
+                "headline": box_info.get("headline", ""),
+                "box_url": box_info.get("box_url", ""),
+            })
+    elif html_scores_games:
+        # HTML fallback when /api/gamehistory/ isn't available
+        for hg in html_scores_games:
+            ka = _resolve_team_key(hg["away_city"])
+            kh = _resolve_team_key(hg["home_city"])
+            if not ka or not kh:
+                continue
+            r_away, r_home = hg["away_r"], hg["home_r"]
+            winner_k = ka if r_away > r_home else kh
+            loser_k = kh if winner_k == ka else ka
+            sim_results.append({
+                "date": hg["date"],
+                "winner_name": team_info[winner_k]["name"],
+                "winner_abbr": team_info[winner_k]["abbr"],
+                "loser_name": team_info[loser_k]["name"],
+                "loser_abbr": team_info[loser_k]["abbr"],
+                "score_str": f"{max(r_away, r_home)}-{min(r_away, r_home)}",
+                "away_abbr": team_info[ka]["abbr"],
+                "home_abbr": team_info[kh]["abbr"],
+                "wp": re.sub(r"\s*\([^)]*\)", "", hg.get("wp", "")).strip(),
+                "lp": re.sub(r"\s*\([^)]*\)", "", hg.get("lp", "")).strip(),
+                "sp": re.sub(r"\s*\([^)]*\)", "", hg.get("sp", "")).strip(),
+                "series_note": hg.get("headline", ""),
+                "headline": hg.get("headline", ""),
+                "box_url": hg.get("box_url", ""),
+            })
+
+    # ── 4. Active & Upcoming Playoff Series Previews ──────────────────────────
+    # Collect pairs from upcoming grid PLUS any unclinched active series
+    series_pairs = set(upcoming_by_pair.keys())
+
+    # Pre-index Players by team_id from API season stats (split 1 = reg, split 21 = playoffs)
+    def safe_int(d, k, default=0):
+        try: return int(d.get(k, default) or default)
+        except: return default
+
+    def safe_float(d, k, default=0.0):
+        try: return float(d.get(k, default) or default)
+        except: return default
+
+    team_bat_reg = defaultdict(list)
+    team_pitch_reg = defaultdict(list)
+    playoff_bat_by_pid = {}
+    playoff_pitch_by_pid = {}
+
+    for r in bat_rows:
+        if r.get("level_id", "1") != "1":
+            continue
+        pid = r.get("player_id", "").strip()
+        tid = str(r.get("team_id", "")).strip()
+        if r.get("split_id") == "1" and tid:
+            team_bat_reg[tid].append(r)
+        elif r.get("split_id") == "21" and pid:
+            playoff_bat_by_pid[pid] = r
+
+    for r in pitch_rows:
+        if r.get("level_id", "1") != "1":
+            continue
+        pid = r.get("player_id", "").strip()
+        tid = str(r.get("team_id", "")).strip()
+        if r.get("split_id") == "1" and tid:
+            team_pitch_reg[tid].append(r)
+        elif r.get("split_id") == "21" and pid:
+            playoff_pitch_by_pid[pid] = r
+
+    # Precompute current regular-season H2H & historical playoff matchups from gamehistory
+    reg_h2h = defaultdict(lambda: {"w_by_tid": defaultdict(int), "r_by_tid": defaultdict(int)})
+    hist_playoffs = defaultdict(lambda: defaultdict(lambda: defaultdict(int)))  # pair -> year -> {tid: wins}
+    min_gh_year = current_date.year
+
+    for g in all_gh:
+        if g.get("played") != "1":
+            continue
+        gdate = g.get("date", "")
+        if len(gdate) < 4:
+            continue
+        gyear = int(gdate[:4])
+        if gyear < min_gh_year:
+            min_gh_year = gyear
+        ka = _resolve_team_key(g.get("away_team"))
+        kh = _resolve_team_key(g.get("home_team"))
+        if not ka or not kh:
+            continue
+        pair = frozenset({ka, kh})
+        r0 = int(g.get("runs0") or 0)
+        r1 = int(g.get("runs1") or 0)
+        winner = ka if r0 > r1 else kh
+
+        if g.get("game_type") == "0" and gdate.startswith(curr_year_str):
+            reg_h2h[pair]["w_by_tid"][winner] += 1
+            reg_h2h[pair]["r_by_tid"][ka] += r0
+            reg_h2h[pair]["r_by_tid"][kh] += r1
+        elif g.get("game_type") == "3" and gyear < current_date.year:
+            hist_playoffs[pair][gyear][winner] += 1
+
+    tvt_html = _parse_team_vs_team_html(league_url) if not all_gh else {}
+
+    def _calc_ops(r):
+        ab = safe_int(r, "ab")
+        h = safe_int(r, "h")
+        bb = safe_int(r, "bb")
+        hp = safe_int(r, "hp")
+        sf = safe_int(r, "sf")
+        d = safe_int(r, "d")
+        t = safe_int(r, "t")
+        hr = safe_int(r, "hr")
+        obp = (h + bb + hp) / max(ab + bb + hp + sf, 1)
+        tb = (h - d - t - hr) + 2 * d + 3 * t + 4 * hr
+        slg = tb / max(ab, 1)
+        return obp + slg
+
+    def _format_player_watch(t_info):
+        tid = t_info.get("tid", "")
+        if not tid:
+            return ""
+        bats = [r for r in team_bat_reg.get(tid, []) if safe_int(r, "pa") >= 100]
+        pitches = [r for r in team_pitch_reg.get(tid, []) if safe_float(r, "ip") >= 40.0]
+        parts = []
+        if bats:
+            top_b = max(bats, key=lambda r: (safe_float(r, "war"), _calc_ops(r)))
+            b_pid = top_b.get("player_id", "")
+            bname = player_names.get(b_pid, "Hitter")
+            ab = max(safe_int(top_b, "ab"), 1)
+            avg = safe_int(top_b, "h") / ab
+            avg_str = f"{avg:.3f}".lstrip("0")
+            hr = safe_int(top_b, "hr")
+            rbi = safe_int(top_b, "rbi")
+            ops_str = f"{_calc_ops(top_b):.3f}".lstrip("0")
+            oct_b = playoff_bat_by_pid.get(b_pid)
+            oct_tag = ""
+            if oct_b and safe_int(oct_b, "ab") > 0:
+                o_h = safe_int(oct_b, "h")
+                o_ab = safe_int(oct_b, "ab")
+                o_hr = safe_int(oct_b, "hr")
+                oct_tag = f"; Oct: {o_h}-for-{o_ab}" + (f", {o_hr} HR" if o_hr > 0 else "")
+            parts.append(f"{bname} ({avg_str}, {hr} HR, {rbi} RBI, {ops_str} OPS{oct_tag})")
+        if pitches:
+            top_p = max(pitches, key=lambda r: (safe_float(r, "war"), -safe_float(r, "er") / max(safe_float(r, "ip"), 1.0)))
+            p_pid = top_p.get("player_id", "")
+            pname = player_names.get(p_pid, "Pitcher")
+            ip = safe_float(top_p, "ip")
+            er = safe_float(top_p, "er")
+            era = (er / ip) * 9.0 if ip > 0 else 0.0
+            w = safe_int(top_p, "w")
+            l = safe_int(top_p, "l")
+            k = safe_int(top_p, "k")
+            oct_p = playoff_pitch_by_pid.get(p_pid)
+            oct_tag = ""
+            if oct_p and safe_float(oct_p, "ip") > 0:
+                o_ip = safe_float(oct_p, "ip")
+                o_er = safe_int(oct_p, "er")
+                o_k = safe_int(oct_p, "k")
+                oct_tag = f"; Oct: {o_ip:.1f} IP, {o_er} ER, {o_k} K"
+            parts.append(f"{pname} ({w}-{l}, {era:.2f} ERA, {k} K{oct_tag})")
+        return "; ".join(parts)
+
+    active_matchups = []
+    for pair in series_pairs:
+        keys = list(pair)
+        if len(keys) != 2:
+            continue
+        k1, k2 = keys[0], keys[1]
+        t1, t2 = team_info[k1], team_info[k2]
+
+        # Determine already played games in this current series
+        played_chunk = curr_series_by_pair[pair][-1] if curr_series_by_pair.get(pair) else []
+        upcoming_games = sorted(upcoming_by_pair[pair], key=lambda g: g["date"])
+
+        total_scheduled = len(played_chunk) + len(upcoming_games)
+        if total_scheduled <= 1:
+            best_of = 1
+            round_label = "Wild Card"
+        elif total_scheduled <= 3:
+            best_of = 3
+            round_label = "Wild Card Series"
+        elif total_scheduled <= 5:
+            best_of = 5
+            round_label = "Division Series"
+        else:
+            best_of = 7
+            round_label = "World Series" if t1["sl_id"] != t2["sl_id"] else "Championship Series"
+
+        if t1["sl_id"] == t2["sl_id"]:
+            league_prefix = "AL " if t1["sl_id"] == 0 else "NL "
+        else:
+            league_prefix = ""
+        series_title = f"{league_prefix}{round_label}"
+
+        # Put Game 1 home team (or higher win% team) as Team A
+        first_home_key = upcoming_games[0]["home_key"] if upcoming_games else (k1 if t1["pct"] >= t2["pct"] else k2)
+        if first_home_key == k2:
+            t1, t2 = t2, t1
+            k1, k2 = k2, k1
+
+        # Current series score
+        w1_cur, w2_cur = 0, 0
+        for g in played_chunk:
+            ka = _resolve_team_key(g.get("away_team"))
+            kh = _resolve_team_key(g.get("home_team"))
+            gw = ka if int(g.get("runs0") or 0) > int(g.get("runs1") or 0) else kh
+            if gw == k1:
+                w1_cur += 1
+            elif gw == k2:
+                w2_cur += 1
+
+        if w1_cur == 0 and w2_cur == 0:
+            start_dt_lbl = datetime.strptime(upcoming_games[0]["date"], "%Y-%m-%d").strftime("%b %d") if upcoming_games else "Upcoming"
+            status_str = f"Best-of-{best_of} (Starts {start_dt_lbl} @ {t1['abbr']})"
+        elif w1_cur == w2_cur:
+            status_str = f"Tied {w1_cur}-{w2_cur} (Best-of-{best_of})"
+        elif w1_cur > w2_cur:
+            status_str = f"{t1['abbr']} leads {w1_cur}-{w2_cur} (Best-of-{best_of})"
+        else:
+            status_str = f"{t2['abbr']} leads {w2_cur}-{w1_cur} (Best-of-{best_of})"
+
+        # Regular-season H2H
+        if all_gh:
+            h2h_w1 = reg_h2h[pair]["w_by_tid"].get(k1, 0)
+            h2h_w2 = reg_h2h[pair]["w_by_tid"].get(k2, 0)
+            h2h_r1 = reg_h2h[pair]["r_by_tid"].get(k1, 0)
+            h2h_r2 = reg_h2h[pair]["r_by_tid"].get(k2, 0)
+            if h2h_w1 > h2h_w2:
+                h2h_str = f"{t1['abbr']} won season series *{h2h_w1}-{h2h_w2}* (runs {h2h_r1}-{h2h_r2})"
+            elif h2h_w2 > h2h_w1:
+                h2h_str = f"{t2['abbr']} won season series *{h2h_w2}-{h2h_w1}* (runs {h2h_r2}-{h2h_r1})"
+            elif (h2h_w1 + h2h_w2) > 0:
+                h2h_str = f"Split season series *{h2h_w1}-{h2h_w2}* (runs {h2h_r1}-{h2h_r2})"
+            else:
+                h2h_str = "Did not meet in regular season"
+        else:
+            rec = tvt_html.get((t1["name"], t2["name"]))
+            if rec:
+                h2h_w1, h2h_w2 = rec
+                if h2h_w1 > h2h_w2:
+                    h2h_str = f"{t1['abbr']} won season series *{h2h_w1}-{h2h_w2}*"
+                elif h2h_w2 > h2h_w1:
+                    h2h_str = f"{t2['abbr']} won season series *{h2h_w2}-{h2h_w1}*"
+                else:
+                    h2h_str = f"Split season series *{h2h_w1}-{h2h_w2}*"
+            else:
+                h2h_str = "Did not meet in regular season"
+
+        # Historical playoff matchups
+        if not all_gh:
+            playoff_hist_str = "StatsPlus API archive unavailable (check API token)"
+        else:
+            past_years = hist_playoffs.get(pair, {})
+            if not past_years:
+                playoff_hist_str = f"First postseason meeting in StatsPlus archive (since {min_gh_year})"
+            else:
+                total_pw1 = sum(yr_map.get(k1, 0) for yr_map in past_years.values())
+                total_pw2 = sum(yr_map.get(k2, 0) for yr_map in past_years.values())
+                yr_parts = []
+                for y in sorted(past_years.keys(), reverse=True)[:3]:
+                    yw1 = past_years[y].get(k1, 0)
+                    yw2 = past_years[y].get(k2, 0)
+                    w_abbr = t1["abbr"] if yw1 >= yw2 else t2["abbr"]
+                    yr_parts.append(f"{y} ({w_abbr} {max(yw1, yw2)}-{min(yw1, yw2)})")
+                if total_pw1 > total_pw2:
+                    alltime_str = f"{t1['abbr']} leads all-time Oct H2H {total_pw1}-{total_pw2}"
+                elif total_pw2 > total_pw1:
+                    alltime_str = f"{t2['abbr']} leads all-time Oct H2H {total_pw2}-{total_pw1}"
+                else:
+                    alltime_str = f"All-time Oct H2H tied {total_pw1}-{total_pw2}"
+                playoff_hist_str = f"{'; '.join(yr_parts)} — {alltime_str}"
+
+        # Series Prediction via blended Pythagorean win% + Log5 + exact DP
+        p1 = min(0.85, max(0.15, 0.85 * t1["pyth_pct"] + 0.15 * t1["pct"]))
+        p2 = min(0.85, max(0.15, 0.85 * t2["pyth_pct"] + 0.15 * t2["pct"]))
+        denom = p1 * (1.0 - p2) + p2 * (1.0 - p1)
+        p1_neutral = (p1 * (1.0 - p2) / denom) if denom > 0 else 0.5
+
+        upcoming_home_flags = [ug["home_key"] == k1 for ug in upcoming_games]
+        pred_is_a, win_pct, likely_games = _predict_series(p1_neutral, w1_cur, w2_cur, upcoming_home_flags, best_of)
+        pred_team = t1 if pred_is_a else t2
+        if best_of == 1:
+            prediction_str = f"*{pred_team['name']}* ({win_pct:.0f}% win prob)"
+        else:
+            prediction_str = f"*{pred_team['name']} in {likely_games}* ({win_pct:.0f}% series prob)"
+
+        # Players to watch
+        watch_1 = _format_player_watch(t1)
+        watch_2 = _format_player_watch(t2)
+        watch_parts = []
+        if watch_1:
+            watch_parts.append(f"*{t1['abbr']}*: {watch_1}")
+        if watch_2:
+            watch_parts.append(f"*{t2['abbr']}*: {watch_2}")
+        watch_str = " | ".join(watch_parts)
+
+        active_matchups.append({
+            "series_title": series_title,
+            "sl_id": t1["sl_id"],
+            "best_of": best_of,
+            "team_a": t1,
+            "team_b": t2,
+            "status_str": status_str,
+            "h2h_str": h2h_str,
+            "playoff_hist_str": playoff_hist_str,
+            "prediction_str": prediction_str,
+            "watch_str": watch_str,
+        })
+
+    # Sort matchups cleanly: AL before NL, World Series first if applicable
+    active_matchups.sort(key=lambda m: (-m["best_of"], m["sl_id"], m["team_a"]["abbr"]))
+
+    return {
+        "window_str": window_str,
+        "sim_results": sim_results,
+        "active_matchups": active_matchups,
+    }
+
 
 if __name__ == "__main__":
     best_pitcher, best_batter = get_best_performances()
