@@ -364,8 +364,12 @@ def get_cached_atbats(league_url, cutoff_date, current_date):
     return rows
 
 def get_cached_gamehistory(league_url, cutoff_date=None, current_date=None, include_history=False):
-    ref_date = current_date or get_league_current_date(league_url)
-    _ensure_cache_fresh(league_url, ref_date)
+    import json
+    import tempfile
+
+    live_date = get_league_current_date(league_url)
+    ref_date = current_date or live_date
+    _ensure_cache_fresh(league_url, live_date)
 
     # If full multi-year history is already cached, satisfy all requests in memory
     if _API_CACHE["gamehistory_all"] is not None:
@@ -381,12 +385,55 @@ def get_cached_gamehistory(league_url, cutoff_date=None, current_date=None, incl
     sep = "&" if token_param else "?"
 
     if include_history:
-        years_query = "&".join(f"year={y}" for y in range(ref_date.year - 9, ref_date.year + 1))
+        tmp_dir = tempfile.gettempdir()
+        live_str = live_date.strftime("%Y-%m-%d")
+        cache_file = os.path.join(tmp_dir, f"xfbl_gh_all_{live_str}.json")
+        if os.path.exists(cache_file):
+            try:
+                with open(cache_file, "r", encoding="utf-8") as f:
+                    rows = json.load(f)
+                if rows:
+                    _API_CACHE["gamehistory_all"] = rows
+                    return rows
+            except Exception:
+                pass
+
+        years_query = "&".join(f"year={y}" for y in range(live_date.year - 9, live_date.year + 1))
         gh_url = f"{league_url.rstrip('/')}/api/gamehistory/{token_param}{sep}{years_query}"
         rows = _fetch_csv_api(gh_url)
         if rows:
             _API_CACHE["gamehistory_all"] = rows
-        return rows
+            try:
+                # Prune older cache files and save current sim's archive to avoid 5-min cooldown on repeat runs
+                for fname in os.listdir(tmp_dir):
+                    if fname.startswith("xfbl_gh_all_") and fname.endswith(".json") and fname != os.path.basename(cache_file):
+                        try:
+                            os.remove(os.path.join(tmp_dir, fname))
+                        except Exception:
+                            pass
+                with open(cache_file, "w", encoding="utf-8") as f:
+                    json.dump(rows, f)
+            except Exception:
+                pass
+            return rows
+
+        # Cooldown fallback: if API returned empty (e.g. "Request too soon" after a sim advance within 5 mins),
+        # check any recent cache file written within the last 10 minutes
+        try:
+            import time
+            now_ts = time.time()
+            for fname in sorted(os.listdir(tmp_dir), reverse=True):
+                if fname.startswith("xfbl_gh_all_") and fname.endswith(".json"):
+                    fpath = os.path.join(tmp_dir, fname)
+                    if (now_ts - os.path.getmtime(fpath)) <= 600:
+                        with open(fpath, "r", encoding="utf-8") as f:
+                            cached = json.load(f)
+                        if cached:
+                            _API_CACHE["gamehistory_all"] = cached
+                            return cached
+        except Exception:
+            pass
+        return []
 
     start_date = cutoff_date or (ref_date - timedelta(days=7))
     start_str = start_date.strftime("%Y-%m-%d")
@@ -3165,7 +3212,13 @@ def _resolve_scores_box_links(league_url, target_dates):
                     continue
                 seen_hrefs.add(href)
                 box_url = urljoin(url, href)
-                card = a.find_parent("table")
+                td = a.find_parent("td")
+                tr = td.find_parent("tr") if td else None
+                tds = tr.find_all("td", recursive=False) if tr else []
+                col_idx = tds.index(td) if td in tds else -1
+                next_tr = tr.find_next_sibling("tr") if tr else None
+                next_tds = next_tr.find_all("td", recursive=False) if next_tr else []
+                card = next_tds[col_idx] if 0 <= col_idx < len(next_tds) else a.find_parent("table")
                 if not card:
                     continue
 

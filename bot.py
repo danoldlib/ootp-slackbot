@@ -558,12 +558,56 @@ def build_playoff_odds_blocks(odds_data):
 
     return blocks
 
+def _split_long_section_blocks(blocks, max_chars=2850):
+    """
+    Ensures every Slack 'section' block stays safely under Slack's 3,000-character
+    text limit by splitting long blocks on newline boundaries.
+    """
+    safe_blocks = []
+    for block in blocks:
+        if block.get("type") != "section" or block.get("accessory"):
+            safe_blocks.append(block)
+            continue
+        text_obj = block.get("text")
+        if not isinstance(text_obj, dict) or text_obj.get("type") != "mrkdwn":
+            safe_blocks.append(block)
+            continue
+        text = text_obj.get("text", "")
+        if len(text) <= max_chars:
+            safe_blocks.append(block)
+            continue
+
+        current_lines = []
+        current_len = 0
+        for line in text.split("\n"):
+            if len(line) > max_chars:
+                # Truncate single pathological line safely
+                line = line[:max_chars - 3] + "..."
+            add_len = len(line) + (1 if current_lines else 0)
+            if current_lines and (current_len + add_len > max_chars):
+                safe_blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(current_lines)}
+                })
+                current_lines = [line]
+                current_len = len(line)
+            else:
+                current_lines.append(line)
+                current_len += add_len
+        if current_lines:
+            safe_blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n".join(current_lines)}
+            })
+    return safe_blocks
+
 def post_daily_digest(blocks):
     if not SLACK_BOT_TOKEN or not SLACK_CHANNEL_ID:
         print("Missing Slack configuration. Cannot post to Slack.")
         return
 
     client = WebClient(token=SLACK_BOT_TOKEN)
+    blocks = _split_long_section_blocks(blocks)
 
     try:
         # Slack enforces a 50-block maximum per message; chunk if needed
@@ -670,10 +714,25 @@ def build_postseason_blocks(best_pitcher, best_batter, headlines, notable_games,
             res_lines.append(
                 f"• *({g['date']})* *{g['winner_name']}* def. {g['loser_name']} *{g['score_str']}*{series_str}{pitch_str}{box_str}"
             )
-        blocks.append({
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": "\n".join(res_lines)}
-        })
+        chunk_lines = []
+        chunk_len = 0
+        for line in res_lines:
+            add_len = len(line) + (1 if chunk_lines else 0)
+            if chunk_lines and (chunk_len + add_len > 2700):
+                blocks.append({
+                    "type": "section",
+                    "text": {"type": "mrkdwn", "text": "\n".join(chunk_lines)}
+                })
+                chunk_lines = [line]
+                chunk_len = len(line)
+            else:
+                chunk_lines.append(line)
+                chunk_len += add_len
+        if chunk_lines:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": "\n".join(chunk_lines)}
+            })
         blocks.append({"type": "divider"})
 
     # 2. Top Playoff Performers of the Sim
